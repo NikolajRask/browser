@@ -1,0 +1,75 @@
+{
+  "name": "lockin",
+  "version": "0.1.0",
+  "description": "Lockin — a browser built for students",
+  "main": "./out/main/index.js",
+  "author": "Lockin",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "install-electron",
+    "package": "npm run build && electron-builder --mac --win",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "@electron-toolkit/utils": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^45.0.0-alpha.13",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^3.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "build": {
+    "appId": "com.lockin.browser",
+    "productName": "Lockin",
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLName": "HTTP URL",
+            "CFBundleURLSchemes": [
+              "http"
+            ]
+          },
+          {
+            "CFBundleURLName": "HTTPS URL",
+            "CFBundleURLSchemes": [
+              "https"
+            ]
+          }
+        ]
+      },
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  }
+}
