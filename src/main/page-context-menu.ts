@@ -8,12 +8,15 @@ import {
   type MenuItemConstructorOptions,
   type WebContents
 } from 'electron'
+import { shouldBookmarkUrl } from './bookmark-store'
 
 type ContextMenuHandlers = {
   openInNewTab: (url: string) => void
   goBack: () => void
   goForward: () => void
   reload: () => void
+  bookmarkPage: () => void
+  bookmarkLink: (url: string, title: string) => void
 }
 
 export function attachPageContextMenu(
@@ -43,6 +46,7 @@ function buildPageContextMenu(
   const isImage = params.mediaType === 'image'
   const canGoBack = webContents.navigationHistory.canGoBack()
   const canGoForward = webContents.navigationHistory.canGoForward()
+  const pageUrl = webContents.getURL()
 
   if (!hasLink && !isImage && !params.isEditable && !hasSelection) {
     items.push(
@@ -62,6 +66,16 @@ function buildPageContextMenu(
       },
       { type: 'separator' }
     )
+
+    if (shouldBookmarkUrl(pageUrl)) {
+      items.push(
+        {
+          label: 'Bookmark This Page',
+          click: () => handlers.bookmarkPage()
+        },
+        { type: 'separator' }
+      )
+    }
   }
 
   if (hasLink) {
@@ -81,9 +95,18 @@ function buildPageContextMenu(
         click: () => {
           void clipboard.writeText(params.linkURL)
         }
-      },
-      { type: 'separator' }
+      }
     )
+
+    if (shouldBookmarkUrl(params.linkURL)) {
+      items.push({
+        label: 'Bookmark Link',
+        click: () =>
+          handlers.bookmarkLink(params.linkURL, params.linkText?.trim() || params.linkURL)
+      })
+    }
+
+    items.push({ type: 'separator' })
   }
 
   if (isImage) {

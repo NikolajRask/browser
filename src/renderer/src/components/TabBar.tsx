@@ -1,5 +1,6 @@
 import { useRef, useState, type DragEvent } from 'react'
 import type { TabInfo } from '../../../shared/ipc'
+import { Favicon } from './Favicon'
 
 type Props = {
   tabs: TabInfo[]
@@ -9,6 +10,8 @@ type Props = {
   onReorder: (fromId: string, toId: string, position: 'before' | 'after') => void
   onSplitDragStart: (id: string) => void
   onSplitDragEnd: () => void
+  onSearchTabs?: () => void
+  searchTabsOpen?: boolean
 }
 
 type DropTarget = {
@@ -23,7 +26,9 @@ export function TabBar({
   onClose,
   onReorder,
   onSplitDragStart,
-  onSplitDragEnd
+  onSplitDragEnd,
+  onSearchTabs,
+  searchTabsOpen = false
 }: Props): React.JSX.Element {
   const dragIdRef = useRef<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -154,18 +159,7 @@ export function TabBar({
               onDrop={(event) => onDropOnTab(event, tab.id)}
               onDragEnd={clearDragState}
             >
-              <span className="tab-favicon" aria-hidden="true">
-                {tab.favicon ? (
-                  <img
-                    src={tab.favicon}
-                    alt=""
-                    draggable={false}
-                    onError={(event) => {
-                      event.currentTarget.style.display = 'none'
-                    }}
-                  />
-                ) : null}
-              </span>
+              <Favicon src={tab.favicon} />
               <span className="tab-title" title={tab.title}>
                 {tab.title || 'New Tab'}
               </span>
@@ -218,6 +212,26 @@ export function TabBar({
           />
         </svg>
       </button>
+      {onSearchTabs ? (
+        <button
+          type="button"
+          className={['tab-search', searchTabsOpen ? 'is-open' : ''].filter(Boolean).join(' ')}
+          aria-label="Search tabs"
+          aria-pressed={searchTabsOpen}
+          onClick={onSearchTabs}
+        >
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            <path
+              d="M10 10l3.5 3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
+      ) : null}
     </div>
   )
 }

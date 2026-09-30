@@ -3,10 +3,13 @@ import { WebContentsView, type BaseWindow, type WebContents } from 'electron'
 import { randomUUID } from 'crypto'
 import {
   CHROME_HEIGHT,
+  BOOKMARKS_BAR_HEIGHT,
   APP_MENU_OVERLAY,
   FIND_BAR_OVERLAY,
+  TAB_SEARCH_OVERLAY,
   IpcChannels,
   SPLIT_GAP,
+  type ClosedTabInfo,
   type FindResult,
   type NavState,
   type SplitSide,
@@ -15,16 +18,40 @@ import {
 import { attachPageContextMenu } from './page-context-menu'
 import { SPLITTER_PAGE_HTML } from './splitter-page'
 import { HistoryStore, shouldRecordHistoryUrl } from './history-store'
+import type { BookmarkStore } from './bookmark-store'
+import {
+  SessionStore,
+  type BrowserSessionState,
+  type SessionTab
+} from './session-store'
+import { buildErrorPageDataUrl, errorPageTitle } from './error-page'
+import { isValidTld } from '../shared/tlds'
+import type { ScreenTimeTracker } from './screentime-tracker'
 
-const DEFAULT_URL = 'about:blank'
+const DEFAULT_URL = 'lockin://newtab'
 const PAGE_PRELOAD = join(__dirname, '../preload/page.js')
+const MAX_CLOSED_TABS = 25
+
+function isNewTabUrl(url: string): boolean {
+  if (!url) return false
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'lockin:' && parsed.hostname === 'newtab'
+  } catch {
+    return url === 'lockin://newtab' || url.startsWith('lockin://newtab/')
+  }
+}
 
 function displayUrl(url: string): string {
-  return !url || url === 'about:blank' ? '' : url
+  return !url || url === 'about:blank' || isNewTabUrl(url) ? '' : url
 }
 
 function isBlankUrl(url: string): boolean {
-  return !url || url === 'about:blank'
+  return !url || url === 'about:blank' || isNewTabUrl(url)
+}
+
+function isErrorInterstitialUrl(url: string): boolean {
+  return url.startsWith('data:text/html')
 }
 
 function lockinPageTitle(url: string): string {
@@ -32,10 +59,57 @@ function lockinPageTitle(url: string): string {
     const hostname = new URL(url).hostname
     if (hostname === 'history') return 'History'
     if (hostname === 'downloads') return 'Downloads'
+    if (hostname === 'passwords') return 'Passwords'
+    if (hostname === 'screentime') return 'Time Locked in'
+    if (hostname === 'bookmarks') return 'Bookmarks'
+    if (hostname === 'todos') return 'Todos'
+    if (hostname === 'settings') return 'Settings'
+    if (hostname === 'newtab') return 'New Tab'
   } catch {
     // Fall through.
   }
   return 'Lockin'
+}
+
+function svgDataUri(body: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">${body}</svg>`
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+const LOCKIN_PAGE_ICONS: Record<string, string> = {
+  bookmarks: svgDataUri(
+    `<path d="M4.5 2.5h7a1 1 0 0 1 1 1v10.2L8 11.3l-4.5 2.4V3.5a1 1 0 0 1 1-1Z" stroke="#5f6368" stroke-width="1.4" stroke-linejoin="round"/>`
+  ),
+  todos: svgDataUri(
+    `<rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="#5f6368" stroke-width="1.4"/><path d="M5 8.1 6.9 10l4.1-4.2" stroke="#5f6368" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`
+  ),
+  downloads: svgDataUri(
+    `<path d="M8 2.5v7.2M5.2 7.3 8 10.1l2.8-2.8M3.5 12.5h9" stroke="#5f6368" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`
+  ),
+  history: svgDataUri(
+    `<circle cx="8" cy="8" r="5.4" stroke="#5f6368" stroke-width="1.4"/><path d="M8 5.2v3.1l2 1.2" stroke="#5f6368" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`
+  ),
+  screentime: svgDataUri(
+    `<path d="M3 12.5V7.2M6.5 12.5V4M10 12.5V8.2M13.5 12.5H2.5" stroke="#5f6368" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`
+  ),
+  passwords: svgDataUri(
+    `<path d="M5.2 7V5.4a2.8 2.8 0 0 1 5.6 0V7" stroke="#5f6368" stroke-width="1.4" stroke-linecap="round"/><rect x="3.5" y="7" width="9" height="6.2" rx="1.4" stroke="#5f6368" stroke-width="1.4"/>`
+  ),
+  settings: svgDataUri(
+    `<circle cx="8" cy="8" r="2.1" stroke="#5f6368" stroke-width="1.4"/><path d="M6.7 2.6h2.6l.4 1.3.9.4 1.2-.7 1.3 1.3-.7 1.2.4.9 1.3.4v2.6l-1.3.4-.4.9.7 1.2-1.3 1.3-1.2-.7-.9.4-.4 1.3H6.7l-.4-1.3-.9-.4-1.2.7L3 11.7l.7-1.2-.4-.9-1.3-.4V6.7l1.3-.4.4-.9L3 3.2 4.2 1.9l1.2.7.9-.4.4-1.3Z" stroke="#5f6368" stroke-width="1.15" stroke-linejoin="round"/>`
+  ),
+  newtab: svgDataUri(
+    `<circle cx="7" cy="7" r="4.2" stroke="#5f6368" stroke-width="1.4"/><path d="M10.2 10.2 13 13" stroke="#5f6368" stroke-width="1.4" stroke-linecap="round"/>`
+  )
+}
+
+function lockinPageFavicon(url: string): string | null {
+  try {
+    const hostname = new URL(url).hostname
+    return LOCKIN_PAGE_ICONS[hostname] ?? null
+  } catch {
+    return null
+  }
 }
 
 type Tab = {
@@ -43,7 +117,11 @@ type Tab = {
   title: string
   url: string
   favicon: string | null
+  lastAccessed: number
   view: WebContentsView
+  suppressHistory: boolean
+  /** Failed navigation URL while an interstitial error page is shown. */
+  errorUrl: string | null
 }
 
 type SplitState = {
@@ -51,10 +129,20 @@ type SplitState = {
   rightId: string
 }
 
+type CreateTabOptions = {
+  activate?: boolean
+  suppressHistory?: boolean
+  title?: string
+  favicon?: string | null
+}
+
 export class TabManager {
   private window: BaseWindow
   private chromeView: WebContentsView
   private history: HistoryStore
+  private session: SessionStore
+  private bookmarks: BookmarkStore | null
+  private screenTime: ScreenTimeTracker | null
   private tabs = new Map<string, Tab>()
   private activeTabId: string | null = null
   private split: SplitState | null = null
@@ -64,30 +152,59 @@ export class TabManager {
   private chromeExpanded = false
   private appMenuOpen = false
   private findOpen = false
+  private tabSearchOpen = false
+  private bookmarksBarVisible = false
   private findQuery = ''
+  private closedTabs: ClosedTabInfo[] = []
   private splitterView: WebContentsView | null = null
+  private restoring = false
   private onTabsChanged: (tabs: TabInfo[]) => void
   private onNavChanged: (state: NavState) => void
+  private onClosedTabsChanged: (tabs: ClosedTabInfo[]) => void
 
   constructor(
     window: BaseWindow,
     chromeView: WebContentsView,
     history: HistoryStore,
+    session: SessionStore,
     handlers: {
       onTabsChanged: (tabs: TabInfo[]) => void
       onNavChanged: (state: NavState) => void
-    }
+      onClosedTabsChanged?: (tabs: ClosedTabInfo[]) => void
+    },
+    screenTime?: ScreenTimeTracker | null,
+    bookmarks?: BookmarkStore | null
   ) {
     this.window = window
     this.chromeView = chromeView
     this.history = history
+    this.session = session
+    this.screenTime = screenTime ?? null
+    this.bookmarks = bookmarks ?? null
     this.onTabsChanged = handlers.onTabsChanged
     this.onNavChanged = handlers.onNavChanged
+    this.onClosedTabsChanged = handlers.onClosedTabsChanged ?? (() => {})
     this.attachKeyboardShortcuts(chromeView.webContents)
+  }
+
+  private syncScreenTime(): void {
+    if (!this.screenTime) return
+    const tab = this.getActiveTab()
+    this.screenTime.setActiveUrl(tab?.url ?? null)
   }
 
   relayout(): void {
     this.layoutViews()
+  }
+
+  setBookmarksBarVisible(visible: boolean): void {
+    if (this.bookmarksBarVisible === visible) return
+    this.bookmarksBarVisible = visible
+    this.layoutViews()
+  }
+
+  private chromeHeight(): number {
+    return CHROME_HEIGHT + (this.bookmarksBarVisible ? BOOKMARKS_BAR_HEIGHT : 0)
   }
 
   startSplitResize(): void {
@@ -105,7 +222,7 @@ export class TabManager {
     if (!left || !right) return
 
     const [width, height] = this.window.getContentSize()
-    const contentHeight = Math.max(height - CHROME_HEIGHT, 0)
+    const contentHeight = Math.max(height - this.chromeHeight(), 0)
     const available = Math.max(width - SPLIT_GAP, 0)
     if (available <= 0) return
 
@@ -123,13 +240,13 @@ export class TabManager {
     // Update pane bounds only — avoid a full relayout (chrome/splitter reattach) every move.
     left.view.setBounds({
       x: 0,
-      y: CHROME_HEIGHT,
+      y: this.chromeHeight(),
       width: leftWidth,
       height: contentHeight
     })
     right.view.setBounds({
       x: leftWidth + SPLIT_GAP,
-      y: CHROME_HEIGHT,
+      y: this.chromeHeight(),
       width: Math.max(width - leftWidth - SPLIT_GAP, 0),
       height: contentHeight
     })
@@ -141,7 +258,8 @@ export class TabManager {
     this.layoutViews()
   }
 
-  createTab(url = DEFAULT_URL): string {
+  createTab(url = DEFAULT_URL, options: CreateTabOptions = {}): string {
+    const activate = options.activate !== false
     const id = randomUUID()
     const view = new WebContentsView({
       webPreferences: {
@@ -152,12 +270,21 @@ export class TabManager {
       }
     })
 
+    const initialUrl = url || DEFAULT_URL
+    const now = Date.now()
     const tab: Tab = {
       id,
-      title: 'New Tab',
-      url,
-      favicon: null,
-      view
+      title:
+        options.title?.trim() ||
+        (initialUrl.startsWith('lockin://') ? lockinPageTitle(initialUrl) : 'New Tab'),
+      url: initialUrl,
+      favicon:
+        options.favicon ??
+        (initialUrl.startsWith('lockin://') ? lockinPageFavicon(initialUrl) : null),
+      lastAccessed: now,
+      view,
+      suppressHistory: options.suppressHistory === true,
+      errorUrl: null
     }
 
     this.tabs.set(id, tab)
@@ -165,15 +292,20 @@ export class TabManager {
     const [width, height] = this.window.getContentSize()
     view.setBounds({
       x: 0,
-      y: CHROME_HEIGHT,
+      y: this.chromeHeight(),
       width,
-      height: Math.max(height - CHROME_HEIGHT, 0)
+      height: Math.max(height - this.chromeHeight(), 0)
     })
+    if (!activate) view.setVisible(false)
     this.window.contentView.addChildView(view)
 
     const { webContents } = view
 
     const recordVisit = (navigatedUrl: string): void => {
+      if (tab.suppressHistory) {
+        tab.suppressHistory = false
+        return
+      }
       if (!shouldRecordHistoryUrl(navigatedUrl)) return
       this.history.add({
         url: navigatedUrl,
@@ -195,21 +327,36 @@ export class TabManager {
       this.emitTabs()
     })
 
-    webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    webContents.on('did-start-navigation', (_event, nextUrl, isInPlace, isMainFrame) => {
       if (!isMainFrame || isInPlace) return
-      tab.favicon = null
+      if (!tab.suppressHistory) {
+        tab.favicon = nextUrl.startsWith('lockin://') ? lockinPageFavicon(nextUrl) : null
+      }
       this.emitTabs()
     })
 
     webContents.on('did-navigate', (_event, navigatedUrl) => {
+      if (isErrorInterstitialUrl(navigatedUrl)) {
+        if (tab.errorUrl) {
+          tab.url = tab.errorUrl
+          this.emitTabs()
+          if (this.activeTabId === id) this.emitNav()
+        }
+        return
+      }
+
+      tab.errorUrl = null
       tab.url = navigatedUrl
       if (navigatedUrl.startsWith('lockin://')) {
         tab.title = lockinPageTitle(navigatedUrl)
-        tab.favicon = null
+        tab.favicon = lockinPageFavicon(navigatedUrl)
       }
       recordVisit(navigatedUrl)
       this.emitTabs()
-      if (this.activeTabId === id) this.emitNav()
+      if (this.activeTabId === id) {
+        this.emitNav()
+        this.syncScreenTime()
+      }
     })
 
     webContents.on('did-navigate-in-page', (_event, navigatedUrl, isMainFrame) => {
@@ -217,13 +364,46 @@ export class TabManager {
       tab.url = navigatedUrl
       recordVisit(navigatedUrl)
       this.emitTabs()
+      if (this.activeTabId === id) {
+        this.emitNav()
+        this.syncScreenTime()
+      }
+    })
+
+    webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return
+      // -3 = ERR_ABORTED (user navigated away / superseded request)
+      if (errorCode === -3) return
+      if (isErrorInterstitialUrl(validatedURL)) return
+
+      const failedUrl = validatedURL || tab.url
+      if (!failedUrl || isBlankUrl(failedUrl)) return
+
+      tab.errorUrl = failedUrl
+      tab.url = failedUrl
+      tab.title = errorPageTitle(errorCode)
+      tab.favicon = null
+      this.emitTabs()
       if (this.activeTabId === id) this.emitNav()
+
+      void webContents.loadURL(buildErrorPageDataUrl(failedUrl, errorCode, errorDescription))
     })
 
     webContents.on('did-finish-load', () => {
-      tab.url = webContents.getURL()
+      const currentUrl = webContents.getURL()
+      if (isErrorInterstitialUrl(currentUrl)) {
+        if (tab.errorUrl) {
+          tab.url = tab.errorUrl
+          this.emitTabs()
+          if (this.activeTabId === id) this.emitNav()
+        }
+        return
+      }
+
+      tab.url = currentUrl
       if (tab.url.startsWith('lockin://')) {
         tab.title = lockinPageTitle(tab.url)
+        tab.favicon = lockinPageFavicon(tab.url)
       } else {
         tab.title = isBlankUrl(tab.url) ? 'New Tab' : webContents.getTitle() || tab.title
       }
@@ -239,6 +419,7 @@ export class TabManager {
       this.activeTabId = id
       this.emitTabs()
       this.emitNav()
+      this.syncScreenTime()
     })
 
     webContents.on('found-in-page', (_event, result) => {
@@ -259,25 +440,143 @@ export class TabManager {
       openInNewTab: (openUrl) => this.createTab(openUrl),
       goBack: () => this.goBack(),
       goForward: () => this.goForward(),
-      reload: () => this.reload()
+      reload: () => this.reload(),
+      bookmarkPage: () => {
+        const tab = this.getActiveTab()
+        if (!tab || !this.bookmarks) return
+        this.bookmarks.addBookmark({
+          url: tab.url,
+          title: tab.title,
+          favicon: tab.favicon
+        })
+      },
+      bookmarkLink: (linkUrl, linkText) => {
+        if (!this.bookmarks) return
+        this.bookmarks.addBookmark({
+          url: linkUrl,
+          title: linkText || linkUrl,
+          favicon: null
+        })
+      }
     })
 
     this.attachKeyboardShortcuts(webContents)
 
-    void webContents.loadURL(url)
-    this.activateTab(id)
+    void webContents.loadURL(initialUrl)
+    if (activate) {
+      this.activateTab(id)
+    } else {
+      this.emitTabs()
+    }
     return id
+  }
+
+  restoreSession(): void {
+    const saved = this.session.load()
+    if (saved.tabs.length === 0) {
+      this.createTab()
+      return
+    }
+
+    this.restoring = true
+    try {
+      const ids: string[] = []
+      for (const tab of saved.tabs) {
+        const raw = tab.url?.trim() || DEFAULT_URL
+        const url = raw === 'about:blank' ? DEFAULT_URL : raw
+        ids.push(
+          this.createTab(url, {
+            activate: false,
+            suppressHistory: true,
+            title: tab.title,
+            favicon: tab.favicon
+          })
+        )
+      }
+
+      const activeId = ids[saved.activeIndex] ?? ids.at(-1)
+      if (!activeId) {
+        this.createTab()
+        return
+      }
+
+      if (saved.split) {
+        const leftId = ids[saved.split.leftIndex]
+        const rightId = ids[saved.split.rightIndex]
+        if (leftId && rightId && leftId !== rightId) {
+          this.split = { leftId, rightId }
+          this.splitRatio = saved.split.ratio
+          this.activeTabId = activeId
+          this.layoutViews()
+          this.emitTabs()
+          this.emitNav()
+          this.syncScreenTime()
+          this.tabs.get(activeId)?.view.webContents.focus()
+          return
+        }
+      }
+
+      this.activateTab(activeId)
+    } finally {
+      this.restoring = false
+      this.persistSession()
+    }
+  }
+
+  persistSession(): void {
+    this.session.save(this.getSessionState())
+  }
+
+  private getSessionState(): BrowserSessionState {
+    const tabs = [...this.tabs.values()]
+    const activeIndex = Math.max(
+      0,
+      tabs.findIndex((tab) => tab.id === this.activeTabId)
+    )
+
+    let split: BrowserSessionState['split'] = null
+    if (this.split) {
+      const leftIndex = tabs.findIndex((tab) => tab.id === this.split!.leftId)
+      const rightIndex = tabs.findIndex((tab) => tab.id === this.split!.rightId)
+      if (leftIndex >= 0 && rightIndex >= 0 && leftIndex !== rightIndex) {
+        split = {
+          leftIndex,
+          rightIndex,
+          ratio: this.splitRatio
+        }
+      }
+    }
+
+    return {
+      version: 1,
+      tabs: tabs.map(
+        (tab): SessionTab => ({
+          url: isBlankUrl(tab.url) ? '' : tab.url,
+          title: tab.title,
+          favicon: tab.favicon
+        })
+      ),
+      activeIndex,
+      split
+    }
   }
 
   activateTab(id: string): void {
     const tab = this.tabs.get(id)
     if (!tab) return
 
+    tab.lastAccessed = Date.now()
+
     if (this.split && (id === this.split.leftId || id === this.split.rightId)) {
       this.activeTabId = id
       this.layoutViews()
       this.emitTabs()
       this.emitNav()
+      this.syncScreenTime()
+      if (this.tabSearchOpen) {
+        this.closeTabSearch()
+        return
+      }
       tab.view.webContents.focus()
       return
     }
@@ -290,6 +589,12 @@ export class TabManager {
     this.layoutViews()
     this.emitTabs()
     this.emitNav()
+    this.syncScreenTime()
+
+    if (this.tabSearchOpen) {
+      this.closeTabSearch()
+      return
+    }
 
     if (this.findOpen) {
       for (const [tabId, other] of this.tabs) {
@@ -313,6 +618,8 @@ export class TabManager {
   closeTab(id: string): void {
     const tab = this.tabs.get(id)
     if (!tab) return
+
+    this.pushClosedTab(tab)
 
     const splitPartner =
       this.split?.leftId === id
@@ -400,6 +707,31 @@ export class TabManager {
     this.layoutChrome()
   }
 
+  setTabSearchOpen(open: boolean): void {
+    if (this.tabSearchOpen === open) return
+    this.tabSearchOpen = open
+    this.layoutChrome()
+    if (!open) {
+      this.getActiveTab()?.view.webContents.focus()
+    }
+  }
+
+  getClosedTabs(): ClosedTabInfo[] {
+    return this.closedTabs.map((tab) => ({ ...tab }))
+  }
+
+  reopenClosedTab(index: number): void {
+    if (index < 0 || index >= this.closedTabs.length) return
+    const [closed] = this.closedTabs.splice(index, 1)
+    if (!closed) return
+    this.emitClosedTabs()
+    this.createTab(closed.url || DEFAULT_URL, {
+      title: closed.title,
+      favicon: closed.favicon
+    })
+    if (this.tabSearchOpen) this.closeTabSearch()
+  }
+
   findInPage(query: string): void {
     const tab = this.getActiveTab()
     if (!tab || tab.view.webContents.isDestroyed()) return
@@ -448,6 +780,7 @@ export class TabManager {
     this.layoutViews()
     this.emitTabs()
     this.emitNav()
+    this.syncScreenTime()
     this.tabs.get(tabId)?.view.webContents.focus()
   }
 
@@ -466,7 +799,23 @@ export class TabManager {
   }
 
   reload(): void {
-    this.getActiveTab()?.view.webContents.reload()
+    const tab = this.getActiveTab()
+    if (!tab) return
+
+    if (tab.errorUrl) {
+      const retryUrl = tab.errorUrl
+      tab.errorUrl = null
+      void tab.view.webContents.loadURL(retryUrl)
+      return
+    }
+
+    tab.view.webContents.reload()
+  }
+
+  printPage(): void {
+    const tab = this.getActiveTab()
+    if (!tab || tab.view.webContents.isDestroyed()) return
+    tab.view.webContents.print({})
   }
 
   private attachKeyboardShortcuts(webContents: WebContents): void {
@@ -476,6 +825,12 @@ export class TabManager {
       const key = input.key.toLowerCase()
       const mod = input.control || input.meta
 
+      if (key === 'escape' && this.tabSearchOpen) {
+        event.preventDefault()
+        this.closeTabSearch()
+        return
+      }
+
       if (key === 'escape' && this.findOpen) {
         event.preventDefault()
         this.closeFind()
@@ -484,9 +839,22 @@ export class TabManager {
 
       if (!mod || input.alt) return
 
+      if (key === 'e' && !input.shift) {
+        event.preventDefault()
+        if (this.tabSearchOpen) this.closeTabSearch()
+        else this.openTabSearch()
+        return
+      }
+
       if (key === 'f' && !input.shift) {
         event.preventDefault()
         this.openFind()
+        return
+      }
+
+      if (key === 'p' && !input.shift) {
+        event.preventDefault()
+        this.printPage()
         return
       }
 
@@ -511,6 +879,7 @@ export class TabManager {
 
   private openFind(): void {
     if (this.chromeView.webContents.isDestroyed()) return
+    if (this.tabSearchOpen) this.closeTabSearch()
     this.findOpen = true
     this.layoutChrome()
     this.chromeView.webContents.focus()
@@ -530,6 +899,30 @@ export class TabManager {
     this.layoutChrome()
     if (!this.chromeView.webContents.isDestroyed()) {
       this.chromeView.webContents.send(IpcChannels.FIND_OPEN, false)
+    }
+    this.getActiveTab()?.view.webContents.focus()
+  }
+
+  private openTabSearch(): void {
+    if (this.chromeView.webContents.isDestroyed()) return
+    if (this.findOpen) this.closeFind()
+    this.tabSearchOpen = true
+    this.layoutChrome()
+    this.chromeView.webContents.focus()
+    this.chromeView.webContents.send(IpcChannels.TAB_SEARCH_OPEN, true)
+    setTimeout(() => {
+      if (!this.chromeView.webContents.isDestroyed()) {
+        this.chromeView.webContents.focus()
+      }
+    }, 50)
+  }
+
+  private closeTabSearch(): void {
+    if (!this.tabSearchOpen) return
+    this.tabSearchOpen = false
+    this.layoutChrome()
+    if (!this.chromeView.webContents.isDestroyed()) {
+      this.chromeView.webContents.send(IpcChannels.TAB_SEARCH_OPEN, false)
     }
     this.getActiveTab()?.view.webContents.focus()
   }
@@ -557,6 +950,7 @@ export class TabManager {
     const tab = this.getActiveTab()
     if (!tab) return
 
+    tab.errorUrl = null
     const url = normalizeUrl(rawUrl)
     void tab.view.webContents.loadURL(url)
   }
@@ -568,7 +962,8 @@ export class TabManager {
       url: displayUrl(tab.url),
       favicon: tab.favicon,
       active: tab.id === this.activeTabId,
-      splitSide: this.getSplitSide(tab.id)
+      splitSide: this.getSplitSide(tab.id),
+      lastAccessed: tab.lastAccessed
     }))
   }
 
@@ -589,8 +984,9 @@ export class TabManager {
     }
 
     const { webContents } = tab.view
+    const url = tab.errorUrl || webContents.getURL() || tab.url
     return {
-      url: displayUrl(webContents.getURL() || tab.url),
+      url: displayUrl(isErrorInterstitialUrl(url) ? tab.url : url),
       canGoBack: webContents.navigationHistory.canGoBack(),
       canGoForward: webContents.navigationHistory.canGoForward()
     }
@@ -608,7 +1004,7 @@ export class TabManager {
 
     // Transparent so pane resizes stay visible under the full-width drag overlay.
     view.setBackgroundColor('#00000000')
-    view.setBounds({ x: 0, y: CHROME_HEIGHT, width: SPLIT_GAP, height: 0 })
+    view.setBounds({ x: 0, y: this.chromeHeight(), width: SPLIT_GAP, height: 0 })
     view.setVisible(false)
 
     void view.webContents.loadURL(
@@ -651,7 +1047,7 @@ export class TabManager {
     if (!this.splitterView) return
 
     this.splitterView.setVisible(false)
-    this.splitterView.setBounds({ x: 0, y: CHROME_HEIGHT, width: 0, height: 0 })
+    this.splitterView.setBounds({ x: 0, y: this.chromeHeight(), width: 0, height: 0 })
 
     if (this.window.contentView.children.includes(this.splitterView)) {
       this.window.contentView.removeChildView(this.splitterView)
@@ -677,10 +1073,12 @@ export class TabManager {
     const chromeHeight = this.chromeExpanded
       ? height
       : this.appMenuOpen
-        ? CHROME_HEIGHT + APP_MENU_OVERLAY
-        : this.findOpen
-          ? CHROME_HEIGHT + FIND_BAR_OVERLAY
-          : CHROME_HEIGHT
+        ? this.chromeHeight() + APP_MENU_OVERLAY
+        : this.tabSearchOpen
+          ? this.chromeHeight() + TAB_SEARCH_OVERLAY
+          : this.findOpen
+            ? this.chromeHeight() + FIND_BAR_OVERLAY
+            : this.chromeHeight()
 
     this.chromeView.setBounds({
       x: 0,
@@ -707,7 +1105,7 @@ export class TabManager {
     if (this.window.isDestroyed()) return
 
     const [width, height] = this.window.getContentSize()
-    const contentHeight = Math.max(height - CHROME_HEIGHT, 0)
+    const contentHeight = Math.max(height - this.chromeHeight(), 0)
 
     this.layoutChrome()
 
@@ -748,13 +1146,13 @@ export class TabManager {
 
       left.view.setBounds({
         x: 0,
-        y: CHROME_HEIGHT,
+        y: this.chromeHeight(),
         width: leftWidth,
         height: contentHeight
       })
       right.view.setBounds({
         x: leftWidth + SPLIT_GAP,
-        y: CHROME_HEIGHT,
+        y: this.chromeHeight(),
         width: Math.max(width - leftWidth - SPLIT_GAP, 0),
         height: contentHeight
       })
@@ -765,14 +1163,14 @@ export class TabManager {
       if (this.isResizingSplit) {
         splitter.setBounds({
           x: 0,
-          y: CHROME_HEIGHT,
+          y: this.chromeHeight(),
           width,
           height: contentHeight
         })
       } else {
         splitter.setBounds({
           x: leftWidth,
-          y: CHROME_HEIGHT,
+          y: this.chromeHeight(),
           width: SPLIT_GAP,
           height: contentHeight
         })
@@ -794,7 +1192,7 @@ export class TabManager {
 
     active.view.setBounds({
       x: 0,
-      y: CHROME_HEIGHT,
+      y: this.chromeHeight(),
       width,
       height: contentHeight
     })
@@ -804,6 +1202,27 @@ export class TabManager {
 
   private emitTabs(): void {
     this.onTabsChanged(this.getTabInfos())
+    if (!this.restoring) this.persistSession()
+  }
+
+  private emitClosedTabs(): void {
+    this.onClosedTabsChanged(this.getClosedTabs())
+  }
+
+  private pushClosedTab(tab: Tab): void {
+    const url = tab.errorUrl || tab.url
+    if (isBlankUrl(url) || isErrorInterstitialUrl(url)) return
+
+    this.closedTabs.unshift({
+      url,
+      title: tab.title || 'New Tab',
+      favicon: tab.favicon,
+      closedAt: Date.now()
+    })
+    if (this.closedTabs.length > MAX_CLOSED_TABS) {
+      this.closedTabs.length = MAX_CLOSED_TABS
+    }
+    this.emitClosedTabs()
   }
 
   private emitNav(): void {
@@ -822,6 +1241,36 @@ export class TabManager {
   }
 }
 
+const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/
+
+/** Host portion of a schemeless address bar input (strips path/query/hash/port). */
+function hostFromSchemelessInput(input: string): string {
+  const withoutPath = input.split(/[/?#]/, 1)[0] ?? input
+  if (withoutPath.startsWith('[')) {
+    const end = withoutPath.indexOf(']')
+    return end === -1 ? withoutPath : withoutPath.slice(1, end)
+  }
+  const colon = withoutPath.lastIndexOf(':')
+  if (colon !== -1 && /^\d+$/.test(withoutPath.slice(colon + 1))) {
+    return withoutPath.slice(0, colon)
+  }
+  return withoutPath
+}
+
+function looksLikeUrl(input: string): boolean {
+  if (input.includes(' ') || !input.includes('.')) return false
+
+  const host = hostFromSchemelessInput(input)
+  if (!host || host.includes(' ')) return false
+  if (IPV4_RE.test(host)) return true
+
+  const labels = host.split('.')
+  if (labels.length < 2 || labels.some((label) => !label)) return false
+
+  const tld = labels[labels.length - 1]!
+  return isValidTld(tld)
+}
+
 export function normalizeUrl(input: string): string {
   const trimmed = input.trim()
   if (!trimmed) return DEFAULT_URL
@@ -830,7 +1279,7 @@ export function normalizeUrl(input: string): string {
     return trimmed
   }
 
-  if (trimmed.includes(' ') || !trimmed.includes('.')) {
+  if (!looksLikeUrl(trimmed)) {
     return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`
   }
 

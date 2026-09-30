@@ -8,9 +8,14 @@ import {
   type ChangeEvent
 } from 'react'
 import type { DownloadEntry, HistoryEntry } from '../../../shared/ipc'
+import { StudyTimer } from './StudyTimer'
+import { TodosMenu } from './TodosMenu'
+import { Calculator } from './Calculator'
 
 type Props = {
   url: string
+  title: string
+  favicon: string | null
   canGoBack: boolean
   canGoForward: boolean
   onBack: () => void
@@ -21,6 +26,13 @@ type Props = {
 
 const SUGGEST_LIMIT = 10
 const BUBBLE_LIMIT = 8
+
+function canBookmarkUrl(url: string): boolean {
+  if (!url || url === 'about:blank') return false
+  if (url.startsWith('lockin://')) return false
+  if (url.startsWith('data:')) return false
+  return true
+}
 
 type InlineCompletion = {
   /** Full text shown in the omnibox (typed prefix + selected suffix). */
@@ -136,6 +148,8 @@ function downloadStatusText(entry: DownloadEntry): string {
 
 export function NavBar({
   url,
+  title,
+  favicon,
   canGoBack,
   canGoForward,
   onBack,
@@ -146,10 +160,14 @@ export function NavBar({
   const [draft, setDraft] = useState(url)
   const [menuOpen, setMenuOpen] = useState(false)
   const [downloadsOpen, setDownloadsOpen] = useState(false)
+  const [timerOpen, setTimerOpen] = useState(false)
+  const [todosOpen, setTodosOpen] = useState(false)
+  const [calculatorOpen, setCalculatorOpen] = useState(false)
   const [downloads, setDownloads] = useState<DownloadEntry[]>([])
   const [suggestions, setSuggestions] = useState<HistoryEntry[]>([])
   const [suggestOpen, setSuggestOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(-1)
+  const [bookmarked, setBookmarked] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const downloadsRef = useRef<HTMLDivElement>(null)
@@ -157,9 +175,11 @@ export function NavBar({
   const suggestSeq = useRef(0)
   const typedQueryRef = useRef('')
   const inlineRef = useRef<InlineCompletion | null>(null)
-  const overlayOpen = menuOpen || suggestOpen || downloadsOpen
+  const overlayOpen =
+    menuOpen || suggestOpen || downloadsOpen || timerOpen || todosOpen || calculatorOpen
   const activeCount = downloads.filter((entry) => entry.state === 'progressing').length
   const showDownloadsButton = downloads.length > 0
+  const starEnabled = canBookmarkUrl(url)
 
   useEffect(() => {
     setDraft(url)
@@ -168,6 +188,33 @@ export function NavBar({
     setActiveIndex(-1)
     typedQueryRef.current = ''
     inlineRef.current = null
+  }, [url])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!canBookmarkUrl(url)) {
+      setBookmarked(false)
+      return
+    }
+    void window.lockin.findBookmarkByUrl(url).then((entry) => {
+      if (!cancelled) setBookmarked(Boolean(entry))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [url])
+
+  useEffect(() => {
+    return window.lockin.onBookmarksUpdated((state) => {
+      if (!canBookmarkUrl(url)) {
+        setBookmarked(false)
+        return
+      }
+      const found = Object.values(state.nodes).some(
+        (node) => node.type === 'bookmark' && node.url === url
+      )
+      setBookmarked(found)
+    })
   }, [url])
 
   // Select the inline suffix before paint so the next keystroke replaces it
@@ -208,15 +255,19 @@ export function NavBar({
       if (isNew) {
         setMenuOpen(false)
         setSuggestOpen(false)
+        setTimerOpen(false)
+        setTodosOpen(false)
+        setCalculatorOpen(false)
         setDownloadsOpen(true)
       }
     })
   }, [])
 
   useEffect(() => {
-    document.documentElement.classList.toggle('app-menu-open', overlayOpen)
+    const bookmarksMenuOpen = Boolean(document.querySelector('.bookmarks-folder-menu'))
+    document.documentElement.classList.toggle('app-menu-open', overlayOpen || bookmarksMenuOpen)
     const passwordPromptOpen = document.documentElement.classList.contains('password-save-open')
-    void window.lockin.setAppMenuOpen(overlayOpen || passwordPromptOpen)
+    void window.lockin.setAppMenuOpen(overlayOpen || passwordPromptOpen || bookmarksMenuOpen)
 
     if (!overlayOpen) return
 
@@ -224,6 +275,9 @@ export function NavBar({
       if (event.key === 'Escape') {
         setMenuOpen(false)
         setDownloadsOpen(false)
+        setTimerOpen(false)
+        setTodosOpen(false)
+        setCalculatorOpen(false)
         setSuggestOpen(false)
         setActiveIndex(-1)
         inlineRef.current = null
@@ -329,6 +383,9 @@ export function NavBar({
 
     setMenuOpen(false)
     setDownloadsOpen(false)
+    setTimerOpen(false)
+    setTodosOpen(false)
+    setCalculatorOpen(false)
 
     if (isDeleting) {
       typedQueryRef.current = next
@@ -406,6 +463,9 @@ export function NavBar({
 
   const closeMenu = (): void => setMenuOpen(false)
   const closeDownloads = (): void => setDownloadsOpen(false)
+  const closeTimer = (): void => setTimerOpen(false)
+  const closeTodos = (): void => setTodosOpen(false)
+  const closeCalculator = (): void => setCalculatorOpen(false)
   const bubbleEntries = downloads.slice(0, BUBBLE_LIMIT)
 
   return (
@@ -472,6 +532,69 @@ export function NavBar({
             </ul>
           ) : null}
         </div>
+        <button
+          type="button"
+          className={`bookmark-star${bookmarked ? ' is-bookmarked' : ''}`}
+          aria-label={bookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+          disabled={!starEnabled}
+          onClick={() => {
+            if (!starEnabled) return
+            closeSuggestions()
+            void window.lockin
+              .toggleBookmark({ url, title, favicon })
+              .then((result) => setBookmarked(result.bookmarked))
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            {bookmarked ? (
+              <path
+                d="M8 1.8 9.9 5.7l4.3.4-3.2 2.9.9 4.2L8 11.4l-3.9 2.2.9-4.2-3.2-2.9 4.3-.4L8 1.8Z"
+                fill="currentColor"
+              />
+            ) : (
+              <path
+                d="M8 2.4 9.6 5.8l3.8.3-2.9 2.6.8 3.7L8 10.6l-3.3 1.8.8-3.7-2.9-2.6 3.8-.3L8 2.4Z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinejoin="round"
+              />
+            )}
+          </svg>
+        </button>
+        <StudyTimer
+          open={timerOpen}
+          onOpenChange={setTimerOpen}
+          onBeforeOpen={() => {
+            closeSuggestions()
+            closeMenu()
+            closeDownloads()
+            closeTodos()
+            closeCalculator()
+          }}
+        />
+        <TodosMenu
+          open={todosOpen}
+          onOpenChange={setTodosOpen}
+          onBeforeOpen={() => {
+            closeSuggestions()
+            closeMenu()
+            closeDownloads()
+            closeTimer()
+            closeCalculator()
+          }}
+        />
+        <Calculator
+          open={calculatorOpen}
+          onOpenChange={setCalculatorOpen}
+          onBeforeOpen={() => {
+            closeSuggestions()
+            closeMenu()
+            closeDownloads()
+            closeTimer()
+            closeTodos()
+          }}
+        />
         {showDownloadsButton ? (
           <div className="downloads-menu" ref={downloadsRef}>
             <button
@@ -483,6 +606,9 @@ export function NavBar({
               onClick={() => {
                 closeSuggestions()
                 closeMenu()
+                closeTimer()
+                closeTodos()
+                closeCalculator()
                 setDownloadsOpen((open) => !open)
               }}
             >
@@ -595,6 +721,9 @@ export function NavBar({
             onClick={() => {
               closeSuggestions()
               closeDownloads()
+              closeTimer()
+              closeTodos()
+              closeCalculator()
               setMenuOpen((open) => !open)
             }}
           >
@@ -611,9 +740,68 @@ export function NavBar({
                 role="menuitem"
                 onClick={() => {
                   closeMenu()
+                  onNavigate('lockin://bookmarks')
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M4.5 2.5h7a1 1 0 0 1 1 1v10.2L8 11.3l-4.5 2.4V3.5a1 1 0 0 1 1-1Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Bookmarks
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
+                  onNavigate('lockin://todos')
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <rect
+                    x="2.5"
+                    y="2.5"
+                    width="11"
+                    height="11"
+                    rx="2"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d="M5 8.1 6.9 10l4.1-4.2"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Todos
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
                   onNavigate('lockin://downloads')
                 }}
               >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M8 2.5v7.2M5.2 7.3 8 10.1l2.8-2.8M3.5 12.5h9"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
                 Downloads
               </button>
               <button
@@ -624,7 +812,45 @@ export function NavBar({
                   onNavigate('lockin://history')
                 }}
               >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle
+                    cx="8"
+                    cy="8"
+                    r="5.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d="M8 5.2v3.1l2 1.2"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
                 Browser history
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
+                  onNavigate('lockin://screentime')
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 12.5V7.2M6.5 12.5V4M10 12.5V8.2M13.5 12.5H2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Time Locked in
               </button>
               <button
                 type="button"
@@ -634,7 +860,80 @@ export function NavBar({
                   onNavigate('lockin://passwords')
                 }}
               >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M5.2 7V5.4a2.8 2.8 0 0 1 5.6 0V7"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                  />
+                  <rect
+                    x="3.5"
+                    y="7"
+                    width="9"
+                    height="6.2"
+                    rx="1.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                </svg>
                 Passwords
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
+                  onNavigate('lockin://settings')
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle
+                    cx="8"
+                    cy="8"
+                    r="2.1"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d="M6.7 2.6h2.6l.4 1.3.9.4 1.2-.7 1.3 1.3-.7 1.2.4.9 1.3.4v2.6l-1.3.4-.4.9.7 1.2-1.3 1.3-1.2-.7-.9.4-.4 1.3H6.7l-.4-1.3-.9-.4-1.2.7L3 11.7l.7-1.2-.4-.9-1.3-.4V6.7l1.3-.4.4-.9L3 3.2 4.2 1.9l1.2.7.9-.4.4-1.3Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Settings
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
+                  void window.lockin.printPage()
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M4.5 5.5V2.5h7v3M4.5 10.5h7v3h-7v-3Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M3.5 5.5h9A1.5 1.5 0 0 1 14 7v3.2a1 1 0 0 1-1 1h-1.5M4.5 11.2H3a1 1 0 0 1-1-1V7A1.5 1.5 0 0 1 3.5 5.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinejoin="round"
+                  />
+                  <circle cx="11.6" cy="7.6" r="0.7" fill="currentColor" />
+                </svg>
+                Print…
               </button>
             </div>
           ) : null}
@@ -648,6 +947,9 @@ export function NavBar({
           onClick={() => {
             closeMenu()
             closeDownloads()
+            closeTimer()
+            closeTodos()
+            closeCalculator()
             closeSuggestions()
           }}
         />

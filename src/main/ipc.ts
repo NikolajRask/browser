@@ -1,20 +1,44 @@
 import { ipcMain } from 'electron'
 import {
   IpcChannels,
+  type BookmarkAddPayload,
+  type BookmarkFolderAddPayload,
+  type BookmarkMovePayload,
+  type BookmarkRenamePayload,
   type LoginDetectedPayload,
   type PasswordSaveResponse,
-  type SplitSide
+  type SplitSide,
+  type TodoAddPayload,
+  type TodoFolderAddPayload,
+  type TodoMovePayload,
+  type TodoRenamePayload
 } from '../shared/ipc'
+import type { BookmarkStore } from './bookmark-store'
 import type { DownloadManager } from './download-manager'
 import type { HistoryStore } from './history-store'
 import type { PasswordManager } from './password-manager'
+import type { ScreenTimeStore } from './screentime-store'
+import type { ScreenTimeTracker } from './screentime-tracker'
 import type { TabManager } from './tab-manager'
+import type { TodoStore } from './todo-store'
+
+export type WindowControlsApi = {
+  isFullScreen: () => boolean
+  close: () => void
+  minimize: () => void
+  toggleFullScreen: () => void
+}
 
 export function registerIpc(
   tabs: TabManager,
   history: HistoryStore,
   downloads: DownloadManager,
-  passwords: PasswordManager
+  passwords: PasswordManager,
+  screenTime: ScreenTimeStore,
+  bookmarks: BookmarkStore,
+  todos: TodoStore,
+  screenTimeTracker?: ScreenTimeTracker | null,
+  windowControls?: WindowControlsApi | null
 ): void {
   ipcMain.handle(IpcChannels.TABS_LIST, () => tabs.getTabInfos())
   ipcMain.handle(IpcChannels.TABS_CREATE, (_event, url?: string) => {
@@ -32,6 +56,13 @@ export function registerIpc(
       tabs.reorderTab(fromId, toId, position)
     }
   )
+  ipcMain.handle(IpcChannels.TABS_CLOSED_LIST, () => tabs.getClosedTabs())
+  ipcMain.handle(IpcChannels.TABS_REOPEN_CLOSED, (_event, index: number) => {
+    tabs.reopenClosedTab(typeof index === 'number' ? index : -1)
+  })
+  ipcMain.handle(IpcChannels.TAB_SEARCH_SET_OPEN, (_event, open: boolean) => {
+    tabs.setTabSearchOpen(Boolean(open))
+  })
   ipcMain.handle(IpcChannels.SPLIT_DRAG_START, (_event, tabId: string) => {
     tabs.beginSplitDrag(tabId)
   })
@@ -124,6 +155,124 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.PASSWORDS_COPY, (_event, id: string) => {
     return passwords.copyPassword(typeof id === 'string' ? id : '')
   })
+  ipcMain.handle(IpcChannels.SCREENTIME_SUMMARY, () => {
+    screenTimeTracker?.flush(true)
+    return screenTime.summary()
+  })
+  ipcMain.handle(IpcChannels.SCREENTIME_CLEAR, () => {
+    screenTimeTracker?.flush(false)
+    screenTime.clear()
+    screenTimeTracker?.flush(true)
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_STATE, () => bookmarks.getState())
+  ipcMain.handle(IpcChannels.BOOKMARKS_BAR, () => bookmarks.listBar())
+  ipcMain.handle(IpcChannels.BOOKMARKS_FIND_URL, (_event, url: string) => {
+    return bookmarks.findByUrl(typeof url === 'string' ? url : '')
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_ADD, (_event, payload: BookmarkAddPayload) => {
+    if (!payload || typeof payload !== 'object') return null
+    const url = typeof payload.url === 'string' ? payload.url : ''
+    return bookmarks.addBookmark({
+      url,
+      title: typeof payload.title === 'string' ? payload.title : undefined,
+      favicon: typeof payload.favicon === 'string' ? payload.favicon : null,
+      parentId: typeof payload.parentId === 'string' ? payload.parentId : undefined
+    })
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_TOGGLE, (_event, payload: BookmarkAddPayload) => {
+    if (!payload || typeof payload !== 'object') return { bookmarked: false, node: null }
+    const url = typeof payload.url === 'string' ? payload.url : ''
+    return bookmarks.toggleBookmark({
+      url,
+      title: typeof payload.title === 'string' ? payload.title : undefined,
+      favicon: typeof payload.favicon === 'string' ? payload.favicon : null,
+      parentId: typeof payload.parentId === 'string' ? payload.parentId : undefined
+    })
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_ADD_FOLDER, (_event, payload: BookmarkFolderAddPayload) => {
+    if (!payload || typeof payload !== 'object') return null
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    const parentId = typeof payload.parentId === 'string' ? payload.parentId : ''
+    return bookmarks.addFolder({ title, parentId })
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_RENAME, (_event, payload: BookmarkRenamePayload) => {
+    if (!payload || typeof payload !== 'object') return false
+    const id = typeof payload.id === 'string' ? payload.id : ''
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    return bookmarks.rename(id, title)
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_REMOVE, (_event, id: string) => {
+    return bookmarks.remove(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_MOVE, (_event, payload: BookmarkMovePayload) => {
+    if (!payload || typeof payload !== 'object') return false
+    const id = typeof payload.id === 'string' ? payload.id : ''
+    const parentId = typeof payload.parentId === 'string' ? payload.parentId : ''
+    const index = typeof payload.index === 'number' ? payload.index : undefined
+    return bookmarks.move(id, parentId, index)
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_FOLDERS, () => bookmarks.getFolderOptions())
+  ipcMain.handle(IpcChannels.BOOKMARKS_OPEN, (_event, url: string) => {
+    if (typeof url === 'string' && url) tabs.navigate(url)
+  })
+  ipcMain.handle(IpcChannels.BOOKMARKS_OPEN_PAGE, () => {
+    tabs.createTab('lockin://bookmarks')
+  })
+  ipcMain.handle(IpcChannels.TODOS_STATE, () => todos.getState())
+  ipcMain.handle(IpcChannels.TODOS_ADD_FOLDER, (_event, payload: TodoFolderAddPayload) => {
+    if (!payload || typeof payload !== 'object') return null
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    return todos.addFolder(title)
+  })
+  ipcMain.handle(IpcChannels.TODOS_RENAME_FOLDER, (_event, payload: TodoRenamePayload) => {
+    if (!payload || typeof payload !== 'object') return false
+    const id = typeof payload.id === 'string' ? payload.id : ''
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    return todos.renameFolder(id, title)
+  })
+  ipcMain.handle(IpcChannels.TODOS_REMOVE_FOLDER, (_event, id: string) => {
+    return todos.removeFolder(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.TODOS_ADD_TODO, (_event, payload: TodoAddPayload) => {
+    if (!payload || typeof payload !== 'object') return null
+    const folderId = typeof payload.folderId === 'string' ? payload.folderId : ''
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    return todos.addTodo(folderId, title)
+  })
+  ipcMain.handle(IpcChannels.TODOS_TOGGLE_TODO, (_event, id: string) => {
+    return todos.toggleTodo(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.TODOS_RENAME_TODO, (_event, payload: TodoRenamePayload) => {
+    if (!payload || typeof payload !== 'object') return false
+    const id = typeof payload.id === 'string' ? payload.id : ''
+    const title = typeof payload.title === 'string' ? payload.title : ''
+    return todos.renameTodo(id, title)
+  })
+  ipcMain.handle(IpcChannels.TODOS_REMOVE_TODO, (_event, id: string) => {
+    return todos.removeTodo(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.TODOS_MOVE_TODO, (_event, payload: TodoMovePayload) => {
+    if (!payload || typeof payload !== 'object') return false
+    const id = typeof payload.id === 'string' ? payload.id : ''
+    const folderId = typeof payload.folderId === 'string' ? payload.folderId : ''
+    return todos.moveTodo(id, folderId)
+  })
+  ipcMain.handle(IpcChannels.TODOS_OPEN_PAGE, () => {
+    tabs.createTab('lockin://todos')
+  })
+  ipcMain.handle(IpcChannels.PAGE_PRINT, () => {
+    tabs.printPage()
+  })
+  ipcMain.handle(IpcChannels.WINDOW_IS_FULLSCREEN, () => windowControls?.isFullScreen() ?? false)
+  ipcMain.handle(IpcChannels.WINDOW_CLOSE, () => {
+    windowControls?.close()
+  })
+  ipcMain.handle(IpcChannels.WINDOW_MINIMIZE, () => {
+    windowControls?.minimize()
+  })
+  ipcMain.handle(IpcChannels.WINDOW_TOGGLE_FULLSCREEN, () => {
+    windowControls?.toggleFullScreen()
+  })
 }
 
 export function unregisterIpc(): void {
@@ -167,7 +316,36 @@ export function unregisterIpc(): void {
     IpcChannels.PASSWORDS_REMOVE,
     IpcChannels.PASSWORDS_CLEAR,
     IpcChannels.PASSWORDS_REVEAL,
-    IpcChannels.PASSWORDS_COPY
+    IpcChannels.PASSWORDS_COPY,
+    IpcChannels.SCREENTIME_SUMMARY,
+    IpcChannels.SCREENTIME_CLEAR,
+    IpcChannels.BOOKMARKS_STATE,
+    IpcChannels.BOOKMARKS_BAR,
+    IpcChannels.BOOKMARKS_FIND_URL,
+    IpcChannels.BOOKMARKS_ADD,
+    IpcChannels.BOOKMARKS_TOGGLE,
+    IpcChannels.BOOKMARKS_ADD_FOLDER,
+    IpcChannels.BOOKMARKS_RENAME,
+    IpcChannels.BOOKMARKS_REMOVE,
+    IpcChannels.BOOKMARKS_MOVE,
+    IpcChannels.BOOKMARKS_FOLDERS,
+    IpcChannels.BOOKMARKS_OPEN,
+    IpcChannels.BOOKMARKS_OPEN_PAGE,
+    IpcChannels.TODOS_STATE,
+    IpcChannels.TODOS_ADD_FOLDER,
+    IpcChannels.TODOS_RENAME_FOLDER,
+    IpcChannels.TODOS_REMOVE_FOLDER,
+    IpcChannels.TODOS_ADD_TODO,
+    IpcChannels.TODOS_TOGGLE_TODO,
+    IpcChannels.TODOS_RENAME_TODO,
+    IpcChannels.TODOS_REMOVE_TODO,
+    IpcChannels.TODOS_MOVE_TODO,
+    IpcChannels.TODOS_OPEN_PAGE,
+    IpcChannels.PAGE_PRINT,
+    IpcChannels.WINDOW_IS_FULLSCREEN,
+    IpcChannels.WINDOW_CLOSE,
+    IpcChannels.WINDOW_MINIMIZE,
+    IpcChannels.WINDOW_TOGGLE_FULLSCREEN
   ]
 
   for (const channel of channels) {

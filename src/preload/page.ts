@@ -21,7 +21,28 @@ const IpcChannels = {
   PASSWORDS_REMOVE: 'passwords:remove',
   PASSWORDS_CLEAR: 'passwords:clear',
   PASSWORDS_REVEAL: 'passwords:reveal',
-  PASSWORDS_COPY: 'passwords:copy'
+  PASSWORDS_COPY: 'passwords:copy',
+  SCREENTIME_SUMMARY: 'screentime:summary',
+  SCREENTIME_CLEAR: 'screentime:clear',
+  BOOKMARKS_STATE: 'bookmarks:state',
+  BOOKMARKS_UPDATED: 'bookmarks:updated',
+  BOOKMARKS_ADD: 'bookmarks:add',
+  BOOKMARKS_ADD_FOLDER: 'bookmarks:add-folder',
+  BOOKMARKS_RENAME: 'bookmarks:rename',
+  BOOKMARKS_REMOVE: 'bookmarks:remove',
+  BOOKMARKS_MOVE: 'bookmarks:move',
+  BOOKMARKS_FOLDERS: 'bookmarks:folders',
+  BOOKMARKS_OPEN: 'bookmarks:open',
+  TODOS_STATE: 'todos:state',
+  TODOS_UPDATED: 'todos:updated',
+  TODOS_ADD_FOLDER: 'todos:add-folder',
+  TODOS_RENAME_FOLDER: 'todos:rename-folder',
+  TODOS_REMOVE_FOLDER: 'todos:remove-folder',
+  TODOS_ADD_TODO: 'todos:add-todo',
+  TODOS_TOGGLE_TODO: 'todos:toggle-todo',
+  TODOS_RENAME_TODO: 'todos:rename-todo',
+  TODOS_REMOVE_TODO: 'todos:remove-todo',
+  TODOS_MOVE_TODO: 'todos:move-todo'
 } as const
 
 export type HistoryEntry = {
@@ -71,12 +92,89 @@ export type CredentialAutofillItem = {
   password: string
 }
 
+export type ScreenTimeDay = {
+  day: string
+  totalMs: number
+}
+
+export type ScreenTimeOrigin = {
+  origin: string
+  ms: number
+}
+
+export type ScreenTimeSummary = {
+  todayTotalMs: number
+  days: ScreenTimeDay[]
+  topOrigins: ScreenTimeOrigin[]
+}
+
+export type BookmarkFolderNode = {
+  id: string
+  type: 'folder'
+  title: string
+  parentId: string | null
+  children: string[]
+  createdAt: number
+}
+
+export type BookmarkLinkNode = {
+  id: string
+  type: 'bookmark'
+  title: string
+  url: string
+  favicon: string | null
+  parentId: string
+  createdAt: number
+}
+
+export type BookmarkNode = BookmarkFolderNode | BookmarkLinkNode
+
+export type BookmarksState = {
+  version: 1
+  rootId: string
+  barId: string
+  otherId: string
+  nodes: Record<string, BookmarkNode>
+}
+
+export type BookmarkFolderOption = {
+  id: string
+  title: string
+  depth: number
+}
+
+export type TodoFolder = {
+  id: string
+  title: string
+  createdAt: number
+  order: number
+}
+
+export type TodoItem = {
+  id: string
+  folderId: string
+  title: string
+  completed: boolean
+  createdAt: number
+}
+
+export type TodosState = {
+  version: 1
+  folders: Record<string, TodoFolder>
+  todos: Record<string, TodoItem>
+  folderOrder: string[]
+}
+
 contextBridge.exposeInMainWorld('lockinHistory', {
   list: (): Promise<HistoryEntry[]> => ipcRenderer.invoke(IpcChannels.HISTORY_LIST),
   remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.HISTORY_REMOVE, id),
   clear: (range?: HistoryClearRange): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.HISTORY_CLEAR, range ?? 'all'),
   open: (url: string): Promise<void> => ipcRenderer.invoke(IpcChannels.HISTORY_OPEN, url)
+})
+
+contextBridge.exposeInMainWorld('lockinNewTab', {
+  go: (input: string): Promise<void> => ipcRenderer.invoke(IpcChannels.HISTORY_OPEN, input)
 })
 
 contextBridge.exposeInMainWorld('lockinDownloads', {
@@ -107,6 +205,69 @@ contextBridge.exposeInMainWorld('lockinPasswords', {
   reveal: (id: string): Promise<string | null> =>
     ipcRenderer.invoke(IpcChannels.PASSWORDS_REVEAL, id),
   copy: (id: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.PASSWORDS_COPY, id)
+})
+
+contextBridge.exposeInMainWorld('lockinScreenTime', {
+  summary: (): Promise<ScreenTimeSummary> => ipcRenderer.invoke(IpcChannels.SCREENTIME_SUMMARY),
+  clear: (): Promise<void> => ipcRenderer.invoke(IpcChannels.SCREENTIME_CLEAR)
+})
+
+contextBridge.exposeInMainWorld('lockinBookmarks', {
+  getState: (): Promise<BookmarksState> => ipcRenderer.invoke(IpcChannels.BOOKMARKS_STATE),
+  addFolder: (title: string, parentId: string): Promise<BookmarkFolderNode | null> =>
+    ipcRenderer.invoke(IpcChannels.BOOKMARKS_ADD_FOLDER, { title, parentId }),
+  addBookmark: (payload: {
+    url: string
+    title?: string
+    favicon?: string | null
+    parentId?: string
+  }): Promise<BookmarkLinkNode | null> => ipcRenderer.invoke(IpcChannels.BOOKMARKS_ADD, payload),
+  rename: (id: string, title: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.BOOKMARKS_RENAME, { id, title }),
+  remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.BOOKMARKS_REMOVE, id),
+  move: (id: string, parentId: string, index?: number): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.BOOKMARKS_MOVE, { id, parentId, index }),
+  listFolders: (): Promise<BookmarkFolderOption[]> =>
+    ipcRenderer.invoke(IpcChannels.BOOKMARKS_FOLDERS),
+  open: (url: string): Promise<void> => ipcRenderer.invoke(IpcChannels.BOOKMARKS_OPEN, url),
+  onUpdated: (callback: (state: BookmarksState) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, state: BookmarksState): void => {
+      callback(state)
+    }
+    ipcRenderer.on(IpcChannels.BOOKMARKS_UPDATED, listener)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.BOOKMARKS_UPDATED, listener)
+    }
+  }
+})
+
+contextBridge.exposeInMainWorld('lockinTodos', {
+  getState: (): Promise<TodosState> => ipcRenderer.invoke(IpcChannels.TODOS_STATE),
+  addFolder: (title: string): Promise<TodoFolder | null> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_ADD_FOLDER, { title }),
+  renameFolder: (id: string, title: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_RENAME_FOLDER, { id, title }),
+  removeFolder: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_REMOVE_FOLDER, id),
+  addTodo: (folderId: string, title: string): Promise<TodoItem | null> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_ADD_TODO, { folderId, title }),
+  toggleTodo: (id: string): Promise<TodoItem | null> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_TOGGLE_TODO, id),
+  renameTodo: (id: string, title: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_RENAME_TODO, { id, title }),
+  removeTodo: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_REMOVE_TODO, id),
+  moveTodo: (id: string, folderId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.TODOS_MOVE_TODO, { id, folderId }),
+  onUpdated: (callback: (state: TodosState) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, state: TodosState): void => {
+      callback(state)
+    }
+    ipcRenderer.on(IpcChannels.TODOS_UPDATED, listener)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.TODOS_UPDATED, listener)
+    }
+  }
 })
 
 const USERNAME_TYPES = new Set(['text', 'email', 'tel', 'url', 'search', ''])

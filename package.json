@@ -6,10 +6,10 @@
   "author": "Lockin",
   "license": "MIT",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/brand-dev-electron.mjs && electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "postinstall": "install-electron",
+    "postinstall": "install-electron && node scripts/brand-dev-electron.mjs",
     "package": "npm run build && electron-builder --mac --win",
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win"

@@ -31,6 +31,7 @@ const CLEAR_RANGE_MS: Record<Exclude<HistoryClearRange, 'all'>, number> = {
 export function shouldRecordHistoryUrl(url: string): boolean {
   if (!url || url === 'about:blank') return false
   if (url.startsWith('lockin://')) return false
+  if (url.startsWith('data:')) return false
   return true
 }
 
