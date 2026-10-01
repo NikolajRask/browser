@@ -1,10 +1,13 @@
 import { ipcMain } from 'electron'
 import {
   IpcChannels,
+  type AiChatRequest,
+  type AiChatSavePayload,
   type BookmarkAddPayload,
   type BookmarkFolderAddPayload,
   type BookmarkMovePayload,
   type BookmarkRenamePayload,
+  type CreateTabOptions,
   type LoginDetectedPayload,
   type PasswordSaveResponse,
   type SplitSide,
@@ -13,7 +16,11 @@ import {
   type TodoMovePayload,
   type TodoRenamePayload
 } from '../shared/ipc'
+import type { AiChatStore } from './ai-chat-store'
+import type { ApiKeyStore } from './api-key-store'
 import type { BookmarkStore } from './bookmark-store'
+import { isIncognitoWebContents } from './browser-session'
+import { decidePageContextMode, pageContextFromCapture, pageContextFromScreenshots, resolvePageContextMode, sanitizeScreenshots, sendClaudeChat } from './claude-chat'
 import type { DownloadManager } from './download-manager'
 import type { HistoryStore } from './history-store'
 import type { PasswordManager } from './password-manager'
@@ -37,13 +44,24 @@ export function registerIpc(
   screenTime: ScreenTimeStore,
   bookmarks: BookmarkStore,
   todos: TodoStore,
+  apiKeys: ApiKeyStore,
+  aiChats: AiChatStore,
   screenTimeTracker?: ScreenTimeTracker | null,
   windowControls?: WindowControlsApi | null
 ): void {
   ipcMain.handle(IpcChannels.TABS_LIST, () => tabs.getTabInfos())
-  ipcMain.handle(IpcChannels.TABS_CREATE, (_event, url?: string) => {
-    tabs.createTab(url)
-  })
+  ipcMain.handle(
+    IpcChannels.TABS_CREATE,
+    (event, url?: string, options?: CreateTabOptions) => {
+      if (typeof url === 'string' && url && tabs.isChromeWebContents(event.sender)) {
+        tabs.markExternalLinkDragHandled()
+      }
+      tabs.createTab(typeof url === 'string' ? url : undefined, {
+        isIncognito: options?.isIncognito === true,
+        placement: options?.placement
+      })
+    }
+  )
   ipcMain.handle(IpcChannels.TABS_CLOSE, (_event, id: string) => {
     tabs.closeTab(id)
   })
@@ -56,6 +74,12 @@ export function registerIpc(
       tabs.reorderTab(fromId, toId, position)
     }
   )
+  ipcMain.handle(IpcChannels.TABS_CONTEXT_MENU, (_event, id: string) => {
+    tabs.showTabContextMenu(id)
+  })
+  ipcMain.handle(IpcChannels.TABS_TOGGLE_MUTE, (_event, id: string) => {
+    tabs.toggleMuteTab(id)
+  })
   ipcMain.handle(IpcChannels.TABS_CLOSED_LIST, () => tabs.getClosedTabs())
   ipcMain.handle(IpcChannels.TABS_REOPEN_CLOSED, (_event, index: number) => {
     tabs.reopenClosedTab(typeof index === 'number' ? index : -1)
@@ -90,6 +114,87 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.APP_MENU_OPEN, (_event, open: boolean) => {
     tabs.setAppMenuOpen(open)
   })
+  ipcMain.handle(IpcChannels.AI_SIDEBAR_OPEN, (_event, open: boolean) => {
+    tabs.setAiSidebarOpen(Boolean(open))
+  })
+  ipcMain.handle(IpcChannels.AI_SIDEBAR_GET_WIDTH, () => tabs.getAiSidebarWidth())
+  ipcMain.on(IpcChannels.AI_SIDEBAR_RESIZE_START, () => {
+    tabs.startAiSidebarResize()
+  })
+  ipcMain.on(IpcChannels.AI_SIDEBAR_RESIZE_MOVE, (_event, screenX: number) => {
+    tabs.moveAiSidebarResize(screenX)
+  })
+  ipcMain.on(IpcChannels.AI_SIDEBAR_RESIZE_END, () => {
+    tabs.endAiSidebarResize()
+  })
+  ipcMain.handle(IpcChannels.AI_HAS_KEY, () => apiKeys.hasClaudeKey())
+  ipcMain.handle(IpcChannels.AI_CHAT, async (event, request: AiChatRequest) => {
+    const messages = Array.isArray(request?.messages) ? request.messages : []
+    const manualScreenshots = sanitizeScreenshots(request?.screenshots)
+
+    let pageContext = null
+    if (manualScreenshots.length > 0) {
+      // User-provided screenshots replace auto page-screenshot routing entirely.
+      pageContext = pageContextFromScreenshots(manualScreenshots)
+    } else {
+      // Meta + text extract (no screenshot yet) for routing and TEXT mode.
+      const pageMeta = await tabs.captureActivePageForAi(false)
+      const routed = await decidePageContextMode(apiKeys, messages, pageMeta)
+      const mode = resolvePageContextMode(routed, pageMeta, messages)
+
+      if (mode === 'none') {
+        pageContext = null
+      } else if (mode === 'text') {
+        pageContext = pageContextFromCapture(pageMeta, { includeScreenshot: false })
+      } else {
+        pageContext = pageContextFromCapture(await tabs.captureActivePageForAi(true), {
+          includeScreenshot: true
+        })
+      }
+    }
+
+    return sendClaudeChat(apiKeys, messages, pageContext, (text) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(IpcChannels.AI_CHAT_CHUNK, { text })
+      }
+    })
+  })
+  ipcMain.handle(IpcChannels.AI_CAPTURE_SCREENSHOT, async () => {
+    const capture = await tabs.captureActivePageForAi(true)
+    if (!capture?.imageBase64) return null
+    return {
+      id: `shot-${Date.now()}`,
+      imageBase64: capture.imageBase64,
+      mediaType: capture.mediaType,
+      title: capture.title,
+      url: capture.url,
+      capturedAt: Date.now()
+    }
+  })
+  ipcMain.handle(IpcChannels.AI_CHATS_LIST, () => aiChats.list())
+  ipcMain.handle(IpcChannels.AI_CHATS_GET, (_event, id: string) => {
+    return aiChats.get(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.AI_CHATS_SAVE, (_event, payload: AiChatSavePayload) => {
+    return aiChats.save(payload)
+  })
+  ipcMain.handle(IpcChannels.AI_CHATS_REMOVE, (_event, id: string) => {
+    return aiChats.remove(typeof id === 'string' ? id : '')
+  })
+  ipcMain.handle(IpcChannels.AI_CHATS_SET_PINNED, (_event, id: string, pinned: boolean) => {
+    return aiChats.setPinned(typeof id === 'string' ? id : '', Boolean(pinned))
+  })
+  ipcMain.handle(IpcChannels.SETTINGS_CLAUDE_STATUS, () => ({
+    configured: apiKeys.hasClaudeKey()
+  }))
+  ipcMain.handle(IpcChannels.SETTINGS_CLAUDE_SET, (_event, key: string) => {
+    const ok = apiKeys.setClaudeKey(typeof key === 'string' ? key : '')
+    return { configured: ok && apiKeys.hasClaudeKey() }
+  })
+  ipcMain.handle(IpcChannels.SETTINGS_CLAUDE_CLEAR, () => {
+    apiKeys.clearClaudeKey()
+    return { configured: false }
+  })
   ipcMain.handle(IpcChannels.FIND_SET_OPEN, (_event, open: boolean) => {
     tabs.setFindOpen(open)
   })
@@ -99,7 +204,22 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.FIND_NEXT, () => tabs.findNext())
   ipcMain.handle(IpcChannels.FIND_PREV, () => tabs.findPrevious())
   ipcMain.handle(IpcChannels.FIND_STOP, () => tabs.stopFindInPage())
-  ipcMain.handle(IpcChannels.HISTORY_LIST, () => history.list())
+  ipcMain.handle(
+    IpcChannels.HISTORY_LIST,
+    (_event, options?: { offset?: number; limit?: number }) => {
+      const offset =
+        typeof options?.offset === 'number' && Number.isFinite(options.offset)
+          ? options.offset
+          : undefined
+      const limit =
+        typeof options?.limit === 'number' && Number.isFinite(options.limit)
+          ? options.limit
+          : undefined
+      return history.list(
+        offset !== undefined || limit !== undefined ? { offset, limit } : undefined
+      )
+    }
+  )
   ipcMain.handle(IpcChannels.HISTORY_REMOVE, (_event, id: string) => history.remove(id))
   ipcMain.handle(IpcChannels.HISTORY_CLEAR, (_event, range?: string) => {
     const allowed = new Set(['hour', 'day', 'week', 'month', 'all'])
@@ -125,7 +245,8 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.DOWNLOADS_OPEN_PAGE, () => {
     downloads.openDownloadsPage()
   })
-  ipcMain.handle(IpcChannels.PASSWORDS_LOGIN_DETECTED, (_event, payload: LoginDetectedPayload) => {
+  ipcMain.handle(IpcChannels.PASSWORDS_LOGIN_DETECTED, (event, payload: LoginDetectedPayload) => {
+    if (isIncognitoWebContents(event.sender)) return { prompted: false, reason: 'incognito' }
     if (!payload || typeof payload !== 'object') return { prompted: false, reason: 'invalid' }
     const origin = typeof payload.origin === 'string' ? payload.origin : ''
     const username = typeof payload.username === 'string' ? payload.username : ''
@@ -139,7 +260,8 @@ export function registerIpc(
     if (!id || (action !== 'save' && action !== 'dismiss' && action !== 'never')) return false
     return passwords.respondToSavePrompt({ id, action })
   })
-  ipcMain.handle(IpcChannels.PASSWORDS_FOR_ORIGIN, (_event, origin: string) => {
+  ipcMain.handle(IpcChannels.PASSWORDS_FOR_ORIGIN, (event, origin: string) => {
+    if (isIncognitoWebContents(event.sender)) return []
     return passwords.forOrigin(typeof origin === 'string' ? origin : '')
   })
   ipcMain.handle(IpcChannels.PASSWORDS_LIST, () => passwords.list())
@@ -263,6 +385,30 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.PAGE_PRINT, () => {
     tabs.printPage()
   })
+  ipcMain.handle(IpcChannels.PAGE_PICTURE_IN_PICTURE, () => {
+    return tabs.togglePictureInPicture()
+  })
+  ipcMain.on(IpcChannels.PAGE_PICTURE_IN_PICTURE_CHANGED, (_event, active: unknown) => {
+    tabs.setPictureInPictureActive(Boolean(active))
+  })
+  ipcMain.on(
+    IpcChannels.PAGE_LINK_DRAG,
+    (
+      event,
+      payload: { phase?: string; url?: string; screenX?: number; screenY?: number } | undefined
+    ) => {
+      if (!payload || typeof payload.url !== 'string') return
+      if (payload.phase === 'start') {
+        tabs.beginExternalLinkDrag(payload.url, isIncognitoWebContents(event.sender))
+        return
+      }
+      if (payload.phase === 'end') {
+        const screenX = typeof payload.screenX === 'number' ? payload.screenX : 0
+        const screenY = typeof payload.screenY === 'number' ? payload.screenY : 0
+        tabs.finishExternalLinkDragAt(screenX, screenY)
+      }
+    }
+  )
   ipcMain.handle(IpcChannels.WINDOW_IS_FULLSCREEN, () => windowControls?.isFullScreen() ?? false)
   ipcMain.handle(IpcChannels.WINDOW_CLOSE, () => {
     windowControls?.close()
@@ -290,6 +436,19 @@ export function unregisterIpc(): void {
     IpcChannels.NAV_RELOAD,
     IpcChannels.NAV_GO,
     IpcChannels.APP_MENU_OPEN,
+    IpcChannels.AI_SIDEBAR_OPEN,
+    IpcChannels.AI_SIDEBAR_GET_WIDTH,
+    IpcChannels.AI_HAS_KEY,
+    IpcChannels.AI_CHAT,
+    IpcChannels.AI_CAPTURE_SCREENSHOT,
+    IpcChannels.AI_CHATS_LIST,
+    IpcChannels.AI_CHATS_GET,
+    IpcChannels.AI_CHATS_SAVE,
+    IpcChannels.AI_CHATS_REMOVE,
+    IpcChannels.AI_CHATS_SET_PINNED,
+    IpcChannels.SETTINGS_CLAUDE_STATUS,
+    IpcChannels.SETTINGS_CLAUDE_SET,
+    IpcChannels.SETTINGS_CLAUDE_CLEAR,
     IpcChannels.FIND_SET_OPEN,
     IpcChannels.FIND_QUERY,
     IpcChannels.FIND_NEXT,
@@ -342,6 +501,7 @@ export function unregisterIpc(): void {
     IpcChannels.TODOS_MOVE_TODO,
     IpcChannels.TODOS_OPEN_PAGE,
     IpcChannels.PAGE_PRINT,
+    IpcChannels.PAGE_PICTURE_IN_PICTURE,
     IpcChannels.WINDOW_IS_FULLSCREEN,
     IpcChannels.WINDOW_CLOSE,
     IpcChannels.WINDOW_MINIMIZE,
@@ -355,4 +515,9 @@ export function unregisterIpc(): void {
   ipcMain.removeAllListeners(IpcChannels.SPLIT_RESIZE_START)
   ipcMain.removeAllListeners(IpcChannels.SPLIT_RESIZE_MOVE)
   ipcMain.removeAllListeners(IpcChannels.SPLIT_RESIZE_END)
+  ipcMain.removeAllListeners(IpcChannels.AI_SIDEBAR_RESIZE_START)
+  ipcMain.removeAllListeners(IpcChannels.AI_SIDEBAR_RESIZE_MOVE)
+  ipcMain.removeAllListeners(IpcChannels.AI_SIDEBAR_RESIZE_END)
+  ipcMain.removeAllListeners(IpcChannels.PAGE_PICTURE_IN_PICTURE_CHANGED)
+  ipcMain.removeAllListeners(IpcChannels.PAGE_LINK_DRAG)
 }

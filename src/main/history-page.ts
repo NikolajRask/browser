@@ -282,6 +282,20 @@ export const HISTORY_PAGE_HTML = `<!doctype html>
         background: #fce8e6;
         color: var(--danger);
       }
+
+      .load-more {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 48px;
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+
+      .load-more[hidden] {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -310,13 +324,22 @@ export const HISTORY_PAGE_HTML = `<!doctype html>
       <div id="content">
         <div class="empty">Loading…</div>
       </div>
+      <div class="load-more" id="load-more" hidden aria-live="polite"></div>
     </div>
     <script>
+      const PAGE_SIZE = 50
       const content = document.getElementById('content')
+      const loadMore = document.getElementById('load-more')
       const subtitle = document.getElementById('subtitle')
       const clearBtn = document.getElementById('clear')
       const clearMenu = document.getElementById('clear-menu')
       const api = window.lockinHistory
+
+      let entries = []
+      let total = 0
+      let loading = false
+      let hasMore = true
+      let loadError = false
 
       const escapeHtml = (value) =>
         String(value)
@@ -368,10 +391,10 @@ export const HISTORY_PAGE_HTML = `<!doctype html>
         return '<span class="favicon-fallback" aria-hidden="true">' + escapeHtml(letter) + '</span>'
       }
 
-      const groupByDay = (entries) => {
+      const groupByDay = (items) => {
         const groups = []
         const indexByKey = new Map()
-        for (const entry of entries) {
+        for (const entry of items) {
           const key = String(startOfDay(entry.visitedAt))
           let group = indexByKey.get(key)
           if (!group) {
@@ -384,70 +407,160 @@ export const HISTORY_PAGE_HTML = `<!doctype html>
         return groups
       }
 
+      const itemHtml = (entry) =>
+        '<li class="item">' +
+        '<button type="button" class="open" data-open="' +
+        escapeHtml(entry.url) +
+        '">' +
+        faviconHtml(entry) +
+        '<span class="meta">' +
+        '<div class="title">' +
+        escapeHtml(entry.title || entry.url) +
+        '</div>' +
+        '<div class="url">' +
+        escapeHtml(entry.url) +
+        '</div>' +
+        '</span>' +
+        '<span class="time">' +
+        escapeHtml(formatTime(entry.visitedAt)) +
+        '</span>' +
+        '</button>' +
+        '<button type="button" class="delete" data-delete="' +
+        escapeHtml(entry.id) +
+        '" aria-label="Delete">×</button>' +
+        '</li>'
+
+      const dayBlockHtml = (group) =>
+        '<section class="day-block" data-day="' +
+        escapeHtml(group.key) +
+        '">' +
+        '<h2 class="day-label">' +
+        escapeHtml(group.label) +
+        '</h2>' +
+        '<ul class="list">' +
+        group.entries.map(itemHtml).join('') +
+        '</ul>' +
+        '</section>'
+
       const setMenuOpen = (open) => {
         clearMenu.hidden = !open
         clearBtn.setAttribute('aria-expanded', open ? 'true' : 'false')
       }
 
-      const render = (entries) => {
-        clearBtn.disabled = entries.length === 0
-        if (entries.length === 0) setMenuOpen(false)
+      const updateChrome = () => {
+        clearBtn.disabled = total === 0
+        if (total === 0) setMenuOpen(false)
         subtitle.textContent =
-          entries.length === 0
+          total === 0
             ? 'Your recently visited pages'
-            : entries.length === 1
+            : total === 1
               ? '1 page in your browsing history'
-              : entries.length + ' pages in your browsing history'
+              : total + ' pages in your browsing history'
 
-        if (!entries.length) {
-          content.innerHTML = '<div class="empty">No browsing history yet</div>'
+        if (!hasMore) {
+          loadMore.hidden = true
+          loadMore.textContent = ''
           return
         }
 
-        content.innerHTML = groupByDay(entries)
-          .map(
-            (group) =>
-              '<section class="day-block">' +
-              '<h2 class="day-label">' +
-              escapeHtml(group.label) +
-              '</h2>' +
-              '<ul class="list">' +
-              group.entries
-                .map(
-                  (entry) =>
-                    '<li class="item">' +
-                    '<button type="button" class="open" data-open="' +
-                    escapeHtml(entry.url) +
-                    '">' +
-                    faviconHtml(entry) +
-                    '<span class="meta">' +
-                    '<div class="title">' +
-                    escapeHtml(entry.title || entry.url) +
-                    '</div>' +
-                    '<div class="url">' +
-                    escapeHtml(entry.url) +
-                    '</div>' +
-                    '</span>' +
-                    '<span class="time">' +
-                    escapeHtml(formatTime(entry.visitedAt)) +
-                    '</span>' +
-                    '</button>' +
-                    '<button type="button" class="delete" data-delete="' +
-                    escapeHtml(entry.id) +
-                    '" aria-label="Delete">×</button>' +
-                    '</li>'
-                )
-                .join('') +
-              '</ul>' +
-              '</section>'
-          )
-          .join('')
+        loadMore.hidden = false
+        loadMore.textContent = loading ? 'Loading…' : ''
+      }
+
+      const renderAll = () => {
+        if (!entries.length) {
+          content.innerHTML = '<div class="empty">No browsing history yet</div>'
+          updateChrome()
+          return
+        }
+
+        content.innerHTML = groupByDay(entries).map(dayBlockHtml).join('')
+        updateChrome()
+      }
+
+      const appendEntries = (batch) => {
+        if (!batch.length) {
+          updateChrome()
+          return
+        }
+
+        if (!entries.length) {
+          entries = batch.slice()
+          renderAll()
+          return
+        }
+
+        const empty = content.querySelector('.empty')
+        if (empty) empty.remove()
+
+        for (const group of groupByDay(batch)) {
+          const existing = content.querySelector('.day-block[data-day="' + group.key + '"]')
+          if (existing) {
+            const list = existing.querySelector('.list')
+            if (list) list.insertAdjacentHTML('beforeend', group.entries.map(itemHtml).join(''))
+            continue
+          }
+          content.insertAdjacentHTML('beforeend', dayBlockHtml(group))
+        }
+
+        entries = entries.concat(batch)
+        updateChrome()
+      }
+
+      const isNearBottom = () => {
+        if (loadMore.hidden) return false
+        const rect = loadMore.getBoundingClientRect()
+        return rect.top < window.innerHeight + 240
+      }
+
+      const loadNextPage = async () => {
+        if (loading || !hasMore || loadError) return
+        loading = true
+        updateChrome()
+
+        try {
+          const page = await api.list({ offset: entries.length, limit: PAGE_SIZE })
+          const batch = Array.isArray(page?.entries) ? page.entries : []
+          total = typeof page?.total === 'number' ? page.total : entries.length + batch.length
+          appendEntries(batch)
+          hasMore = entries.length < total && batch.length > 0
+        } catch {
+          loadError = true
+          hasMore = false
+          if (!entries.length) {
+            content.innerHTML = '<div class="empty">Could not load history</div>'
+          }
+        } finally {
+          loading = false
+          updateChrome()
+          if (hasMore && isNearBottom()) {
+            queueMicrotask(() => {
+              void loadNextPage()
+            })
+          }
+        }
       }
 
       const refresh = async () => {
-        const entries = await api.list()
-        render(entries)
+        entries = []
+        total = 0
+        hasMore = true
+        loadError = false
+        loading = false
+        content.innerHTML = '<div class="empty">Loading…</div>'
+        loadMore.hidden = true
+        await loadNextPage()
       }
+
+      const sentinelObserver = new IntersectionObserver(
+        (observerEntries) => {
+          if (observerEntries.some((entry) => entry.isIntersecting)) {
+            void loadNextPage()
+          }
+        },
+        { root: null, rootMargin: '240px 0px', threshold: 0 }
+      )
+      sentinelObserver.observe(loadMore)
 
       content.addEventListener('click', async (event) => {
         const target = event.target

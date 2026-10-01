@@ -10,13 +10,22 @@ import {
 } from 'electron'
 import { shouldBookmarkUrl } from './bookmark-store'
 
+type PictureInPictureOptions = {
+  x: number
+  y: number
+  srcURL: string
+}
+
 type ContextMenuHandlers = {
   openInNewTab: (url: string) => void
+  openInIncognitoTab?: (url: string) => void
+  isIncognito?: boolean
   goBack: () => void
   goForward: () => void
   reload: () => void
   bookmarkPage: () => void
   bookmarkLink: (url: string, title: string) => void
+  pictureInPicture: (options: PictureInPictureOptions) => void
 }
 
 export function attachPageContextMenu(
@@ -44,11 +53,12 @@ function buildPageContextMenu(
   const hasLink = Boolean(params.linkURL)
   const hasSelection = Boolean(params.selectionText?.trim())
   const isImage = params.mediaType === 'image'
+  const isVideo = params.mediaType === 'video'
   const canGoBack = webContents.navigationHistory.canGoBack()
   const canGoForward = webContents.navigationHistory.canGoForward()
   const pageUrl = webContents.getURL()
 
-  if (!hasLink && !isImage && !params.isEditable && !hasSelection) {
+  if (!hasLink && !isImage && !isVideo && !params.isEditable && !hasSelection) {
     items.push(
       {
         label: 'Back',
@@ -79,11 +89,19 @@ function buildPageContextMenu(
   }
 
   if (hasLink) {
+    items.push({
+      label: 'Open Link in New Tab',
+      click: () => handlers.openInNewTab(params.linkURL)
+    })
+
+    if (!handlers.isIncognito && handlers.openInIncognitoTab) {
+      items.push({
+        label: 'Open Link in Incognito Tab',
+        click: () => handlers.openInIncognitoTab?.(params.linkURL)
+      })
+    }
+
     items.push(
-      {
-        label: 'Open Link in New Tab',
-        click: () => handlers.openInNewTab(params.linkURL)
-      },
       {
         label: 'Save Link As…',
         click: () => {
@@ -111,14 +129,25 @@ function buildPageContextMenu(
 
   if (isImage) {
     const imageUrl = params.srcURL
-    items.push(
-      {
-        label: 'Open Image in New Tab',
+    items.push({
+      label: 'Open Image in New Tab',
+      enabled: Boolean(imageUrl),
+      click: () => {
+        if (imageUrl) handlers.openInNewTab(imageUrl)
+      }
+    })
+
+    if (!handlers.isIncognito && handlers.openInIncognitoTab) {
+      items.push({
+        label: 'Open Image in Incognito Tab',
         enabled: Boolean(imageUrl),
         click: () => {
-          if (imageUrl) handlers.openInNewTab(imageUrl)
+          if (imageUrl) handlers.openInIncognitoTab?.(imageUrl)
         }
-      },
+      })
+    }
+
+    items.push(
       {
         label: 'Save Image As…',
         enabled: Boolean(imageUrl),
@@ -141,6 +170,22 @@ function buildPageContextMenu(
         enabled: Boolean(imageUrl),
         click: () => {
           if (imageUrl) void clipboard.writeText(imageUrl)
+        }
+      },
+      { type: 'separator' }
+    )
+  }
+
+  if (isVideo) {
+    items.push(
+      {
+        label: 'Picture in Picture',
+        click: () => {
+          handlers.pictureInPicture({
+            x: params.x,
+            y: params.y,
+            srcURL: params.srcURL || ''
+          })
         }
       },
       { type: 'separator' }

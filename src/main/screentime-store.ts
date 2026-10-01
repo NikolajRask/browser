@@ -1,7 +1,12 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { app } from 'electron'
-import type { ScreenTimeDay, ScreenTimeOrigin, ScreenTimeSummary } from '../shared/ipc'
+import type {
+  ScreenTimeDay,
+  ScreenTimeOrigin,
+  ScreenTimeStreak,
+  ScreenTimeSummary
+} from '../shared/ipc'
 
 type DayBucket = {
   totalMs: number
@@ -15,6 +20,7 @@ type ScreenTimeData = {
 const MAX_DAYS = 90
 const SUMMARY_DAYS = 7
 const TOP_ORIGINS = 15
+const TOP_STREAKS = 15
 
 export function shouldRecordScreenTimeUrl(url: string): boolean {
   if (!url || url === 'about:blank') return false
@@ -141,10 +147,42 @@ export class ScreenTimeStore {
     this.persist()
   }
 
+  private visitedOnDay(origin: string, dayKey: string): boolean {
+    const ms = this.data.days[dayKey]?.byOrigin[origin] ?? 0
+    return ms > 0
+  }
+
+  streakForOrigin(origin: string, now: Date = new Date()): number {
+    this.ensureLoaded()
+    if (!origin) return 0
+
+    const todayKey = dayKeyFromDate(now)
+    const yesterdayKey = shiftDayKey(todayKey, -1)
+
+    let startKey: string
+    if (this.visitedOnDay(origin, todayKey)) {
+      startKey = todayKey
+    } else if (this.visitedOnDay(origin, yesterdayKey)) {
+      startKey = yesterdayKey
+    } else {
+      return 0
+    }
+
+    let streak = 0
+    let key = startKey
+    while (this.visitedOnDay(origin, key)) {
+      streak += 1
+      key = shiftDayKey(key, -1)
+      if (streak >= MAX_DAYS) break
+    }
+    return streak
+  }
+
   summary(now: Date = new Date()): ScreenTimeSummary {
     this.ensureLoaded()
 
     const todayKey = dayKeyFromDate(now)
+    const yesterdayKey = shiftDayKey(todayKey, -1)
     const today = this.data.days[todayKey]
 
     const days: ScreenTimeDay[] = []
@@ -157,14 +195,41 @@ export class ScreenTimeStore {
     }
 
     const topOrigins: ScreenTimeOrigin[] = Object.entries(today?.byOrigin ?? {})
-      .map(([origin, ms]) => ({ origin, ms }))
+      .map(([origin, ms]) => ({
+        origin,
+        ms,
+        streakDays: this.streakForOrigin(origin, now)
+      }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, TOP_ORIGINS)
+
+    // Prefer origins with activity today or yesterday so dead streaks don't dominate.
+    const candidateOrigins = new Set<string>()
+    for (const key of [todayKey, yesterdayKey]) {
+      const bucket = this.data.days[key]
+      if (!bucket) continue
+      for (const origin of Object.keys(bucket.byOrigin)) {
+        candidateOrigins.add(origin)
+      }
+    }
+
+    const streaks: ScreenTimeStreak[] = Array.from(candidateOrigins)
+      .map((origin) => ({
+        origin,
+        streakDays: this.streakForOrigin(origin, now)
+      }))
+      .filter((item) => item.streakDays > 0)
+      .sort((a, b) => {
+        if (b.streakDays !== a.streakDays) return b.streakDays - a.streakDays
+        return a.origin.localeCompare(b.origin)
+      })
+      .slice(0, TOP_STREAKS)
 
     return {
       todayTotalMs: today?.totalMs ?? 0,
       days,
-      topOrigins
+      topOrigins,
+      streaks
     }
   }
 

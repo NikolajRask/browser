@@ -1,12 +1,16 @@
 import { join } from 'path'
-import { WebContentsView, type BaseWindow, type WebContents } from 'electron'
+import { Menu, WebContentsView, type BaseWindow, type WebContents } from 'electron'
 import { randomUUID } from 'crypto'
 import {
   CHROME_HEIGHT,
+  TAB_ROW_HEIGHT,
   BOOKMARKS_BAR_HEIGHT,
   APP_MENU_OVERLAY,
   FIND_BAR_OVERLAY,
   TAB_SEARCH_OVERLAY,
+  AI_SIDEBAR_WIDTH,
+  AI_SIDEBAR_MIN_WIDTH,
+  AI_SIDEBAR_MAX_WIDTH,
   IpcChannels,
   SPLIT_GAP,
   type ClosedTabInfo,
@@ -17,6 +21,7 @@ import {
 } from '../shared/ipc'
 import { attachPageContextMenu } from './page-context-menu'
 import { SPLITTER_PAGE_HTML } from './splitter-page'
+import { AI_RESIZE_OVERLAY_HTML } from './ai-resize-overlay-page'
 import { HistoryStore, shouldRecordHistoryUrl } from './history-store'
 import type { BookmarkStore } from './bookmark-store'
 import {
@@ -27,6 +32,11 @@ import {
 import { buildErrorPageDataUrl, errorPageTitle } from './error-page'
 import { isValidTld } from '../shared/tlds'
 import type { ScreenTimeTracker } from './screentime-tracker'
+import {
+  INCOGNITO_PARTITION,
+  clearIncognitoSession,
+  configureIncognitoSession
+} from './browser-session'
 
 const DEFAULT_URL = 'lockin://newtab'
 const PAGE_PRELOAD = join(__dirname, '../preload/page.js')
@@ -50,11 +60,22 @@ function isBlankUrl(url: string): boolean {
   return !url || url === 'about:blank' || isNewTabUrl(url)
 }
 
+function shouldCapturePageForAi(url: string): boolean {
+  if (!url || url === 'about:blank' || isBlankUrl(url)) return false
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'lockin:' && parsed.hostname === 'passwords') return false
+  } catch {
+    return false
+  }
+  return true
+}
+
 function isErrorInterstitialUrl(url: string): boolean {
   return url.startsWith('data:text/html')
 }
 
-function lockinPageTitle(url: string): string {
+function lockinPageTitle(url: string, isIncognito = false): string {
   try {
     const hostname = new URL(url).hostname
     if (hostname === 'history') return 'History'
@@ -64,7 +85,7 @@ function lockinPageTitle(url: string): string {
     if (hostname === 'bookmarks') return 'Bookmarks'
     if (hostname === 'todos') return 'Todos'
     if (hostname === 'settings') return 'Settings'
-    if (hostname === 'newtab') return 'New Tab'
+    if (hostname === 'newtab') return isIncognito ? 'New Incognito Tab' : 'New Tab'
   } catch {
     // Fall through.
   }
@@ -120,6 +141,7 @@ type Tab = {
   lastAccessed: number
   view: WebContentsView
   suppressHistory: boolean
+  isIncognito: boolean
   /** Failed navigation URL while an interstitial error page is shown. */
   errorUrl: string | null
 }
@@ -132,8 +154,11 @@ type SplitState = {
 type CreateTabOptions = {
   activate?: boolean
   suppressHistory?: boolean
+  isIncognito?: boolean
   title?: string
   favicon?: string | null
+  afterId?: string
+  placement?: { tabId: string; position: 'before' | 'after' }
 }
 
 export class TabManager {
@@ -151,13 +176,22 @@ export class TabManager {
   private pageViewsHidden = false
   private chromeExpanded = false
   private appMenuOpen = false
+  private aiSidebarOpen = false
+  private aiSidebarWidth = AI_SIDEBAR_WIDTH
+  private isResizingAiSidebar = false
   private findOpen = false
   private tabSearchOpen = false
   private bookmarksBarVisible = false
   private findQuery = ''
   private closedTabs: ClosedTabInfo[] = []
   private splitterView: WebContentsView | null = null
+  private aiSidebarView: WebContentsView | null = null
+  private aiResizeOverlay: WebContentsView | null = null
+  /** Tracks whether an HTML PiP window is currently open. */
+  private pictureInPictureActive = false
+  private pipToggleInFlight = false
   private restoring = false
+  private externalLinkDrag: { url: string; isIncognito: boolean; handled: boolean } | null = null
   private onTabsChanged: (tabs: TabInfo[]) => void
   private onNavChanged: (state: NavState) => void
   private onClosedTabsChanged: (tabs: ClosedTabInfo[]) => void
@@ -190,7 +224,20 @@ export class TabManager {
   private syncScreenTime(): void {
     if (!this.screenTime) return
     const tab = this.getActiveTab()
+    if (tab?.isIncognito) {
+      this.screenTime.setActiveUrl(null)
+      return
+    }
     this.screenTime.setActiveUrl(tab?.url ?? null)
+  }
+
+  private hasIncognitoTabs(): boolean {
+    return Array.from(this.tabs.values()).some((tab) => tab.isIncognito)
+  }
+
+  private maybeClearIncognitoSession(): void {
+    if (this.hasIncognitoTabs()) return
+    void clearIncognitoSession()
   }
 
   relayout(): void {
@@ -260,13 +307,18 @@ export class TabManager {
 
   createTab(url = DEFAULT_URL, options: CreateTabOptions = {}): string {
     const activate = options.activate !== false
+    const isIncognito = options.isIncognito === true
     const id = randomUUID()
+
+    if (isIncognito) configureIncognitoSession()
+
     const view = new WebContentsView({
       webPreferences: {
         preload: PAGE_PRELOAD,
         sandbox: true,
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        ...(isIncognito ? { partition: INCOGNITO_PARTITION } : {})
       }
     })
 
@@ -276,7 +328,9 @@ export class TabManager {
       id,
       title:
         options.title?.trim() ||
-        (initialUrl.startsWith('lockin://') ? lockinPageTitle(initialUrl) : 'New Tab'),
+        (initialUrl.startsWith('lockin://')
+          ? lockinPageTitle(initialUrl, isIncognito)
+          : 'New Tab'),
       url: initialUrl,
       favicon:
         options.favicon ??
@@ -284,6 +338,7 @@ export class TabManager {
       lastAccessed: now,
       view,
       suppressHistory: options.suppressHistory === true,
+      isIncognito,
       errorUrl: null
     }
 
@@ -302,6 +357,7 @@ export class TabManager {
     const { webContents } = view
 
     const recordVisit = (navigatedUrl: string): void => {
+      if (tab.isIncognito) return
       if (tab.suppressHistory) {
         tab.suppressHistory = false
         return
@@ -316,14 +372,22 @@ export class TabManager {
     }
 
     webContents.on('page-title-updated', (_event, title) => {
-      tab.title = isBlankUrl(webContents.getURL()) ? 'New Tab' : title || 'New Tab'
-      this.history.updateMeta(webContents.getURL() || tab.url, { title: tab.title })
+      tab.title = isBlankUrl(webContents.getURL())
+        ? tab.isIncognito
+          ? 'New Incognito Tab'
+          : 'New Tab'
+        : title || 'New Tab'
+      if (!tab.isIncognito) {
+        this.history.updateMeta(webContents.getURL() || tab.url, { title: tab.title })
+      }
       this.emitTabs()
     })
 
     webContents.on('page-favicon-updated', (_event, favicons) => {
       tab.favicon = favicons.at(-1) ?? favicons[0] ?? null
-      this.history.updateMeta(webContents.getURL() || tab.url, { favicon: tab.favicon })
+      if (!tab.isIncognito) {
+        this.history.updateMeta(webContents.getURL() || tab.url, { favicon: tab.favicon })
+      }
       this.emitTabs()
     })
 
@@ -348,7 +412,7 @@ export class TabManager {
       tab.errorUrl = null
       tab.url = navigatedUrl
       if (navigatedUrl.startsWith('lockin://')) {
-        tab.title = lockinPageTitle(navigatedUrl)
+        tab.title = lockinPageTitle(navigatedUrl, tab.isIncognito)
         tab.favicon = lockinPageFavicon(navigatedUrl)
       }
       recordVisit(navigatedUrl)
@@ -402,12 +466,18 @@ export class TabManager {
 
       tab.url = currentUrl
       if (tab.url.startsWith('lockin://')) {
-        tab.title = lockinPageTitle(tab.url)
+        tab.title = lockinPageTitle(tab.url, tab.isIncognito)
         tab.favicon = lockinPageFavicon(tab.url)
       } else {
-        tab.title = isBlankUrl(tab.url) ? 'New Tab' : webContents.getTitle() || tab.title
+        tab.title = isBlankUrl(tab.url)
+          ? tab.isIncognito
+            ? 'New Incognito Tab'
+            : 'New Tab'
+          : webContents.getTitle() || tab.title
       }
-      this.history.updateMeta(tab.url, { title: tab.title, favicon: tab.favicon })
+      if (!tab.isIncognito) {
+        this.history.updateMeta(tab.url, { title: tab.title, favicon: tab.favicon })
+      }
       this.emitTabs()
       if (this.activeTabId === id) this.emitNav()
     })
@@ -432,22 +502,24 @@ export class TabManager {
     })
 
     webContents.setWindowOpenHandler(({ url: openUrl }) => {
-      this.createTab(openUrl)
+      this.createTab(openUrl, { isIncognito: tab.isIncognito })
       return { action: 'deny' }
     })
 
     attachPageContextMenu(webContents, this.window, {
-      openInNewTab: (openUrl) => this.createTab(openUrl),
+      isIncognito: tab.isIncognito,
+      openInNewTab: (openUrl) => this.createTab(openUrl, { isIncognito: tab.isIncognito }),
+      openInIncognitoTab: (openUrl) => this.createTab(openUrl, { isIncognito: true }),
       goBack: () => this.goBack(),
       goForward: () => this.goForward(),
       reload: () => this.reload(),
       bookmarkPage: () => {
-        const tab = this.getActiveTab()
-        if (!tab || !this.bookmarks) return
+        const active = this.getActiveTab()
+        if (!active || !this.bookmarks) return
         this.bookmarks.addBookmark({
-          url: tab.url,
-          title: tab.title,
-          favicon: tab.favicon
+          url: active.url,
+          title: active.title,
+          favicon: active.favicon
         })
       },
       bookmarkLink: (linkUrl, linkText) => {
@@ -457,12 +529,22 @@ export class TabManager {
           title: linkText || linkUrl,
           favicon: null
         })
+      },
+      pictureInPicture: (options) => {
+        void this.togglePictureInPicture({ ...options, webContents })
       }
     })
 
     this.attachKeyboardShortcuts(webContents)
 
     void webContents.loadURL(initialUrl)
+
+    if (options.placement && this.tabs.has(options.placement.tabId)) {
+      this.reorderTab(id, options.placement.tabId, options.placement.position)
+    } else if (options.afterId && this.tabs.has(options.afterId)) {
+      this.reorderTab(id, options.afterId, 'after')
+    }
+
     if (activate) {
       this.activateTab(id)
     } else {
@@ -528,11 +610,11 @@ export class TabManager {
   }
 
   private getSessionState(): BrowserSessionState {
-    const tabs = [...this.tabs.values()]
-    const activeIndex = Math.max(
-      0,
-      tabs.findIndex((tab) => tab.id === this.activeTabId)
-    )
+    const tabs = [...this.tabs.values()].filter((tab) => !tab.isIncognito)
+    let activeIndex = tabs.findIndex((tab) => tab.id === this.activeTabId)
+    if (activeIndex < 0) {
+      activeIndex = Math.max(0, tabs.length - 1)
+    }
 
     let split: BrowserSessionState['split'] = null
     if (this.split) {
@@ -619,6 +701,7 @@ export class TabManager {
     const tab = this.tabs.get(id)
     if (!tab) return
 
+    const wasIncognito = tab.isIncognito
     this.pushClosedTab(tab)
 
     const splitPartner =
@@ -631,6 +714,8 @@ export class TabManager {
     this.window.contentView.removeChildView(tab.view)
     tab.view.webContents.close()
     this.tabs.delete(id)
+
+    if (wasIncognito) this.maybeClearIncognitoSession()
 
     if (this.split && (this.split.leftId === id || this.split.rightId === id)) {
       this.split = null
@@ -656,6 +741,75 @@ export class TabManager {
       this.layoutViews()
       this.emitTabs()
     }
+  }
+
+  closeOtherTabs(keepId: string): void {
+    if (!this.tabs.has(keepId)) return
+    const toClose = [...this.tabs.keys()].filter((id) => id !== keepId)
+    for (const id of toClose) {
+      this.closeTab(id)
+    }
+  }
+
+  duplicateTab(id: string): void {
+    const tab = this.tabs.get(id)
+    if (!tab) return
+    this.createTab(tab.url || DEFAULT_URL, {
+      isIncognito: tab.isIncognito,
+      afterId: id
+    })
+  }
+
+  toggleMuteTab(id: string): void {
+    const tab = this.tabs.get(id)
+    if (!tab || tab.view.webContents.isDestroyed()) return
+    const muted = tab.view.webContents.isAudioMuted()
+    tab.view.webContents.setAudioMuted(!muted)
+    this.emitTabs()
+  }
+
+  showTabContextMenu(tabId: string): void {
+    const tab = this.tabs.get(tabId)
+    if (!tab || this.window.isDestroyed()) return
+
+    const hasOthers = this.tabs.size > 1
+    const isMuted =
+      !tab.view.webContents.isDestroyed() && tab.view.webContents.isAudioMuted()
+    const menu = Menu.buildFromTemplate([
+      {
+        label: 'Close tab',
+        click: () => this.closeTab(tabId)
+      },
+      {
+        label: 'Close every other tab',
+        enabled: hasOthers,
+        click: () => this.closeOtherTabs(tabId)
+      },
+      { type: 'separator' },
+      {
+        label: 'New tab to the right',
+        click: () =>
+          this.createTab(DEFAULT_URL, {
+            isIncognito: tab.isIncognito,
+            afterId: tabId
+          })
+      },
+      {
+        label: 'Duplicate',
+        click: () => this.duplicateTab(tabId)
+      },
+      { type: 'separator' },
+      {
+        label: 'Refresh',
+        click: () => this.reload(tabId)
+      },
+      {
+        label: isMuted ? 'Unmute this tab' : 'Mute this tab',
+        click: () => this.toggleMuteTab(tabId)
+      }
+    ])
+
+    menu.popup({ window: this.window })
   }
 
   reorderTab(fromId: string, toId: string, position: 'before' | 'after'): void {
@@ -695,6 +849,78 @@ export class TabManager {
     if (this.appMenuOpen === open) return
     this.appMenuOpen = open
     this.layoutChrome()
+  }
+
+  setAiSidebarOpen(open: boolean): void {
+    if (this.aiSidebarOpen === open) return
+    this.aiSidebarOpen = open
+    if (open) {
+      const view = this.ensureAiSidebarView()
+      // Warm the resize overlay so the first drag does not race page load.
+      this.ensureAiResizeOverlay()
+      this.layoutViews()
+      this.broadcastAiSidebarWidth()
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.focus()
+      }
+    } else {
+      this.isResizingAiSidebar = false
+      if (this.aiSidebarView && !this.aiSidebarView.webContents.isDestroyed()) {
+        this.aiSidebarView.setVisible(false)
+      }
+      this.hideAiResizeOverlay()
+      this.layoutViews()
+      this.getActiveTab()?.view.webContents.focus()
+    }
+    this.broadcastAiSidebarOpen()
+  }
+
+  private broadcastAiSidebarOpen(): void {
+    if (this.chromeView.webContents.isDestroyed()) return
+    this.chromeView.webContents.send(IpcChannels.AI_SIDEBAR_OPEN_CHANGED, this.aiSidebarOpen)
+  }
+
+  getAiSidebarWidth(): number {
+    return this.aiSidebarWidth
+  }
+
+  startAiSidebarResize(): void {
+    if (!this.aiSidebarOpen || this.isResizingAiSidebar) return
+    this.isResizingAiSidebar = true
+    this.layoutViews()
+    const overlay = this.aiResizeOverlay
+    if (overlay && !overlay.webContents.isDestroyed()) {
+      overlay.webContents.focus()
+    }
+  }
+
+  moveAiSidebarResize(screenX: number): void {
+    if (!this.aiSidebarOpen || !this.isResizingAiSidebar) return
+    if (typeof screenX !== 'number' || !Number.isFinite(screenX)) return
+
+    const [width] = this.window.getContentSize()
+    const contentBounds = this.window.getContentBounds()
+    const clientX = Math.round(screenX - contentBounds.x)
+    const minPage = 200
+    const maxSidebar = Math.min(AI_SIDEBAR_MAX_WIDTH, Math.max(width - minPage, AI_SIDEBAR_MIN_WIDTH))
+    const next = Math.min(Math.max(width - clientX, AI_SIDEBAR_MIN_WIDTH), maxSidebar)
+    if (next === this.aiSidebarWidth) return
+    this.aiSidebarWidth = next
+    // Avoid full layoutViews() here — re-parenting views mid-drag drops events.
+    this.layoutAiResizeDrag()
+    this.broadcastAiSidebarWidth()
+  }
+
+  endAiSidebarResize(): void {
+    if (!this.isResizingAiSidebar) return
+    this.isResizingAiSidebar = false
+    this.layoutViews()
+    this.broadcastAiSidebarWidth()
+  }
+
+  private broadcastAiSidebarWidth(): void {
+    if (!this.aiSidebarView || this.aiSidebarView.webContents.isDestroyed()) return
+    this.aiSidebarView.webContents.send(IpcChannels.AI_SIDEBAR_WIDTH_CHANGED, this.aiSidebarWidth)
   }
 
   setFindOpen(open: boolean): void {
@@ -798,9 +1024,9 @@ export class TabManager {
     }
   }
 
-  reload(): void {
-    const tab = this.getActiveTab()
-    if (!tab) return
+  reload(id?: string): void {
+    const tab = id ? this.tabs.get(id) : this.getActiveTab()
+    if (!tab || tab.view.webContents.isDestroyed()) return
 
     if (tab.errorUrl) {
       const retryUrl = tab.errorUrl
@@ -816,6 +1042,205 @@ export class TabManager {
     const tab = this.getActiveTab()
     if (!tab || tab.view.webContents.isDestroyed()) return
     tab.view.webContents.print({})
+  }
+
+  async captureActivePageForAi(includeScreenshot = true): Promise<{
+    title: string
+    url: string
+    imageBase64: string | null
+    mediaType: 'image/jpeg'
+    pageText: string | null
+    selectionText: string | null
+  } | null> {
+    const tab = this.getActiveTab()
+    if (!tab || tab.view.webContents.isDestroyed()) return null
+
+    const url = tab.url || ''
+    const title = tab.title || ''
+    const shownUrl = displayUrl(url) || url
+    const canCapture = shouldCapturePageForAi(url)
+
+    let pageText: string | null = null
+    let selectionText: string | null = null
+    if (canCapture) {
+      try {
+        const extracted = (await tab.view.webContents.executeJavaScript(
+          `(() => {
+            const normalize = (value) =>
+              String(value || '')
+                .replace(/\\u00a0/g, ' ')
+                .replace(/[ \\t]+\\n/g, '\\n')
+                .replace(/\\n{3,}/g, '\\n\\n')
+                .replace(/[ \\t]{2,}/g, ' ')
+                .trim();
+            const selection = normalize(window.getSelection && window.getSelection().toString());
+            const root =
+              document.querySelector('article') ||
+              document.querySelector('main') ||
+              document.querySelector('[role="main"]') ||
+              document.body;
+            const page = normalize(root && root.innerText ? root.innerText : '');
+            const max = 12000;
+            return {
+              selection: selection ? selection.slice(0, max) : '',
+              pageText: page ? page.slice(0, max) : ''
+            };
+          })()`,
+          true
+        )) as { selection?: string; pageText?: string } | null
+
+        selectionText =
+          typeof extracted?.selection === 'string' && extracted.selection.trim()
+            ? extracted.selection.trim()
+            : null
+        pageText =
+          typeof extracted?.pageText === 'string' && extracted.pageText.trim()
+            ? extracted.pageText.trim()
+            : null
+      } catch {
+        pageText = null
+        selectionText = null
+      }
+    }
+
+    let imageBase64: string | null = null
+    if (includeScreenshot && canCapture) {
+      try {
+        let image = await tab.view.webContents.capturePage()
+        if (!image.isEmpty()) {
+          const size = image.getSize()
+          const maxWidth = 1280
+          if (size.width > maxWidth && size.width > 0) {
+            const height = Math.max(1, Math.round((size.height * maxWidth) / size.width))
+            image = image.resize({ width: maxWidth, height, quality: 'better' })
+          }
+          imageBase64 = image.toJPEG(70).toString('base64')
+        }
+      } catch {
+        imageBase64 = null
+      }
+    }
+
+    return {
+      title,
+      url: shownUrl,
+      imageBase64,
+      mediaType: 'image/jpeg',
+      pageText,
+      selectionText
+    }
+  }
+
+  isPictureInPictureActive(): boolean {
+    return this.pictureInPictureActive
+  }
+
+  setPictureInPictureActive(active: boolean): void {
+    // Ignore leave events fired mid-toggle (exit-then-enter).
+    if (this.pipToggleInFlight && !active) return
+    this.pictureInPictureActive = active
+  }
+
+  async togglePictureInPicture(
+    options: {
+      x?: number
+      y?: number
+      srcURL?: string
+      webContents?: WebContents
+    } = {}
+  ): Promise<void> {
+    const contents =
+      options.webContents && !options.webContents.isDestroyed()
+        ? options.webContents
+        : this.getActiveTab()?.view.webContents
+
+    if (!contents || contents.isDestroyed()) return
+
+    const target = {
+      x: typeof options.x === 'number' ? options.x : null,
+      y: typeof options.y === 'number' ? options.y : null,
+      srcURL: typeof options.srcURL === 'string' && options.srcURL ? options.srcURL : null
+    }
+
+    const script = `(() => {
+      const target = ${JSON.stringify(target)};
+
+      const collectVideos = (root, out) => {
+        for (const video of root.querySelectorAll('video')) out.push(video);
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) collectVideos(el.shadowRoot, out);
+        }
+      };
+
+      const videos = [];
+      collectVideos(document, videos);
+
+      const pickTargeted = () => {
+        if (target.x != null && target.y != null) {
+          let node = document.elementFromPoint(target.x, target.y);
+          while (node) {
+            if (node instanceof HTMLVideoElement) return node;
+            node = node.parentElement;
+          }
+        }
+        if (target.srcURL) {
+          const match = videos.find(
+            (v) => v.currentSrc === target.srcURL || v.src === target.srcURL
+          );
+          if (match) return match;
+        }
+        return null;
+      };
+
+      const pickUntargeted = () => {
+        const playing = videos.find((v) => !v.paused && v.readyState >= 2);
+        if (playing) return playing;
+        let best = null;
+        let bestArea = 0;
+        for (const v of videos) {
+          if (v.readyState < 2) continue;
+          const area = (v.clientWidth || 0) * (v.clientHeight || 0);
+          if (area >= bestArea) {
+            best = v;
+            bestArea = area;
+          }
+        }
+        return best || videos[0] || null;
+      };
+
+      const video = pickTargeted() || pickUntargeted();
+      if (!video) return { ok: false, reason: 'no-video' };
+      if (!document.pictureInPictureEnabled) return { ok: false, reason: 'disabled' };
+
+      if (document.pictureInPictureElement === video) {
+        return document.exitPictureInPicture().then(() => ({ ok: true, action: 'exit' }));
+      }
+      if (document.pictureInPictureElement) {
+        return document
+          .exitPictureInPicture()
+          .then(() => video.requestPictureInPicture())
+          .then(() => ({ ok: true, action: 'enter' }));
+      }
+      return video.requestPictureInPicture().then(() => ({ ok: true, action: 'enter' }));
+    })()`
+
+    this.pipToggleInFlight = true
+    try {
+      const result = (await contents.executeJavaScript(script, true)) as {
+        ok?: boolean
+        action?: string
+      } | null
+
+      if (result?.ok && result.action === 'enter') {
+        this.pictureInPictureActive = true
+      } else if (result?.ok && result.action === 'exit') {
+        this.pictureInPictureActive = false
+      }
+    } catch {
+      // Sites may block PiP or lack a usable <video>; fail quietly.
+    } finally {
+      this.pipToggleInFlight = false
+    }
   }
 
   private attachKeyboardShortcuts(webContents: WebContents): void {
@@ -852,9 +1277,10 @@ export class TabManager {
         return
       }
 
-      if (key === 'p' && !input.shift) {
+      if (key === 'p') {
         event.preventDefault()
-        this.printPage()
+        if (input.shift) void this.togglePictureInPicture()
+        else this.printPage()
         return
       }
 
@@ -865,14 +1291,18 @@ export class TabManager {
         return
       }
 
+      if (key === 'n') {
+        event.preventDefault()
+        if (input.shift) this.createTab(DEFAULT_URL, { isIncognito: true })
+        else this.createTab()
+        return
+      }
+
       if (input.shift) return
 
       if (key === 'r') {
         event.preventDefault()
         this.reload()
-      } else if (key === 'n') {
-        event.preventDefault()
-        this.createTab()
       }
     })
   }
@@ -963,8 +1393,62 @@ export class TabManager {
       favicon: tab.favicon,
       active: tab.id === this.activeTabId,
       splitSide: this.getSplitSide(tab.id),
-      lastAccessed: tab.lastAccessed
+      lastAccessed: tab.lastAccessed,
+      isIncognito: tab.isIncognito,
+      isMuted: !tab.view.webContents.isDestroyed() && tab.view.webContents.isAudioMuted()
     }))
+  }
+
+  isChromeWebContents(webContents: WebContents): boolean {
+    return (
+      !this.chromeView.webContents.isDestroyed() &&
+      this.chromeView.webContents.id === webContents.id
+    )
+  }
+
+  beginExternalLinkDrag(url: string, isIncognito: boolean): void {
+    const trimmed = url.trim()
+    if (!trimmed) return
+    this.externalLinkDrag = { url: trimmed, isIncognito, handled: false }
+  }
+
+  markExternalLinkDragHandled(): void {
+    if (this.externalLinkDrag) {
+      this.externalLinkDrag.handled = true
+    }
+  }
+
+  finishExternalLinkDragAt(screenX: number, screenY: number): void {
+    const drag = this.externalLinkDrag
+    this.externalLinkDrag = null
+    if (!drag || drag.handled) return
+    if (!this.isScreenPointInTabStrip(screenX, screenY)) return
+    this.openLinkInNewTab(drag.url, { isIncognito: drag.isIncognito })
+  }
+
+  openLinkInNewTab(
+    rawUrl: string,
+    options: { isIncognito?: boolean; placement?: { tabId: string; position: 'before' | 'after' } }
+  ): void {
+    const url = normalizeUrl(rawUrl)
+    if (!url || url === DEFAULT_URL) return
+    this.createTab(url, {
+      isIncognito: options.isIncognito === true,
+      placement: options.placement
+    })
+  }
+
+  private isScreenPointInTabStrip(screenX: number, screenY: number): boolean {
+    if (this.window.isDestroyed()) return false
+    const bounds = this.window.getContentBounds()
+    const localX = screenX - bounds.x
+    const localY = screenY - bounds.y
+    return (
+      localX >= 0 &&
+      localX <= bounds.width &&
+      localY >= 0 &&
+      localY <= TAB_ROW_HEIGHT
+    )
   }
 
   getPageWebContents(): WebContents[] {
@@ -1012,6 +1496,187 @@ export class TabManager {
     )
 
     return view
+  }
+
+  private aiPanelUrl(): string {
+    const base = this.chromeView.webContents.getURL()
+    try {
+      const url = new URL(base)
+      url.searchParams.set('panel', 'ai')
+      url.hash = ''
+      return url.toString()
+    } catch {
+      const joinChar = base.includes('?') ? '&' : '?'
+      return `${base}${joinChar}panel=ai`
+    }
+  }
+
+  private createAiSidebarView(): WebContentsView {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, '../preload/index.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    })
+    view.setBackgroundColor('#ffffffff')
+    view.setBounds({ x: 0, y: this.chromeHeight(), width: 0, height: 0 })
+    view.setVisible(false)
+    void view.webContents.loadURL(this.aiPanelUrl())
+    return view
+  }
+
+  private ensureAiSidebarView(): WebContentsView {
+    if (!this.aiSidebarView || this.aiSidebarView.webContents.isDestroyed()) {
+      this.aiSidebarView = this.createAiSidebarView()
+    }
+
+    const attached = this.window.contentView.children.includes(this.aiSidebarView)
+    if (!attached) {
+      this.window.contentView.addChildView(this.aiSidebarView)
+    }
+
+    return this.aiSidebarView
+  }
+
+  private layoutAiSidebar(pageWidth: number, contentHeight: number, windowWidth: number): void {
+    if (!this.aiSidebarOpen) {
+      if (this.aiSidebarView && !this.aiSidebarView.webContents.isDestroyed()) {
+        this.aiSidebarView.setVisible(false)
+      }
+      this.hideAiResizeOverlay()
+      return
+    }
+
+    const view = this.ensureAiSidebarView()
+    const sidebarWidth = Math.max(windowWidth - pageWidth, 0)
+    view.setBackgroundColor('#ffffffff')
+    view.setVisible(true)
+    // Keep the sidebar view right-aligned always — never expand it leftward
+    // during drag (that caused a one-frame flash of the panel on the left).
+    view.setBounds({
+      x: pageWidth,
+      y: this.chromeHeight(),
+      width: sidebarWidth,
+      height: contentHeight
+    })
+    this.window.contentView.addChildView(view)
+
+    if (this.isResizingAiSidebar) {
+      const overlay = this.ensureAiResizeOverlay()
+      overlay.setVisible(true)
+      overlay.setBounds({
+        x: 0,
+        y: this.chromeHeight(),
+        width: windowWidth,
+        height: contentHeight
+      })
+      this.window.contentView.addChildView(overlay)
+    } else {
+      this.hideAiResizeOverlay()
+    }
+  }
+
+  private createAiResizeOverlay(): WebContentsView {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, '../preload/ai-resize.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    })
+    view.setBackgroundColor('#00000000')
+    view.setBounds({ x: 0, y: this.chromeHeight(), width: 0, height: 0 })
+    view.setVisible(false)
+    void view.webContents.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(AI_RESIZE_OVERLAY_HTML)}`
+    )
+    return view
+  }
+
+  private ensureAiResizeOverlay(): WebContentsView {
+    if (!this.aiResizeOverlay || this.aiResizeOverlay.webContents.isDestroyed()) {
+      this.aiResizeOverlay = this.createAiResizeOverlay()
+    }
+    const attached = this.window.contentView.children.includes(this.aiResizeOverlay)
+    if (!attached) {
+      this.window.contentView.addChildView(this.aiResizeOverlay)
+    }
+    return this.aiResizeOverlay
+  }
+
+  private hideAiResizeOverlay(): void {
+    if (!this.aiResizeOverlay || this.aiResizeOverlay.webContents.isDestroyed()) return
+    this.aiResizeOverlay.setVisible(false)
+    this.aiResizeOverlay.setBounds({ x: 0, y: this.chromeHeight(), width: 0, height: 0 })
+  }
+
+  /** Update page + sidebar bounds mid-drag without re-stacking the overlay. */
+  private layoutAiResizeDrag(): void {
+    if (this.window.isDestroyed() || !this.aiSidebarOpen) return
+
+    const [width, height] = this.window.getContentSize()
+    const contentHeight = Math.max(height - this.chromeHeight(), 0)
+    const pageWidth = this.pageContentWidth(width)
+    const chromeY = this.chromeHeight()
+
+    if (this.split) {
+      const left = this.tabs.get(this.split.leftId)
+      const right = this.tabs.get(this.split.rightId)
+      if (left && right) {
+        const available = Math.max(pageWidth - SPLIT_GAP, 0)
+        const minWidth = Math.min(
+          Math.max(200, Math.round(pageWidth * 0.2)),
+          Math.floor(available / 2)
+        )
+        const leftWidth = Math.min(
+          Math.max(Math.round(this.splitRatio * available), minWidth),
+          available - minWidth
+        )
+        this.splitRatio = available > 0 ? leftWidth / available : 0.5
+        left.view.setBounds({
+          x: 0,
+          y: chromeY,
+          width: leftWidth,
+          height: contentHeight
+        })
+        right.view.setBounds({
+          x: leftWidth + SPLIT_GAP,
+          y: chromeY,
+          width: Math.max(pageWidth - leftWidth - SPLIT_GAP, 0),
+          height: contentHeight
+        })
+        if (this.splitterView && !this.splitterView.webContents.isDestroyed() && !this.isResizingSplit) {
+          this.splitterView.setBounds({
+            x: leftWidth,
+            y: chromeY,
+            width: SPLIT_GAP,
+            height: contentHeight
+          })
+        }
+      }
+    } else {
+      const active = this.getActiveTab()
+      if (active) {
+        active.view.setBounds({
+          x: 0,
+          y: chromeY,
+          width: pageWidth,
+          height: contentHeight
+        })
+      }
+    }
+
+    if (this.aiSidebarView && !this.aiSidebarView.webContents.isDestroyed()) {
+      this.aiSidebarView.setBounds({
+        x: pageWidth,
+        y: chromeY,
+        width: Math.max(width - pageWidth, 0),
+        height: contentHeight
+      })
+    }
   }
 
   private ensureSplitter(): WebContentsView {
@@ -1066,6 +1731,17 @@ export class TabManager {
     return this.tabs.get(this.activeTabId)
   }
 
+  private pageContentWidth(windowWidth: number): number {
+    if (!this.aiSidebarOpen) return windowWidth
+    const sidebar = Math.min(
+      Math.max(this.aiSidebarWidth, AI_SIDEBAR_MIN_WIDTH),
+      AI_SIDEBAR_MAX_WIDTH,
+      Math.max(windowWidth - 200, AI_SIDEBAR_MIN_WIDTH)
+    )
+    this.aiSidebarWidth = sidebar
+    return Math.max(windowWidth - sidebar, 200)
+  }
+
   private layoutChrome(): void {
     if (this.window.isDestroyed() || this.chromeView.webContents.isDestroyed()) return
 
@@ -1106,6 +1782,7 @@ export class TabManager {
 
     const [width, height] = this.window.getContentSize()
     const contentHeight = Math.max(height - this.chromeHeight(), 0)
+    const pageWidth = this.pageContentWidth(width)
 
     this.layoutChrome()
 
@@ -1114,6 +1791,11 @@ export class TabManager {
         tab.view.setVisible(false)
       }
       this.splitterView?.setVisible(false)
+      if (this.aiSidebarView && !this.aiSidebarView.webContents.isDestroyed()) {
+        this.aiSidebarView.setVisible(false)
+      }
+      this.hideAiResizeOverlay()
+      this.layoutChrome()
       return
     }
 
@@ -1128,9 +1810,9 @@ export class TabManager {
         return
       }
 
-      const available = Math.max(width - SPLIT_GAP, 0)
+      const available = Math.max(pageWidth - SPLIT_GAP, 0)
       const minWidth = Math.min(
-        Math.max(200, Math.round(width * 0.2)),
+        Math.max(200, Math.round(pageWidth * 0.2)),
         Math.floor(available / 2)
       )
       const leftWidth = Math.min(
@@ -1153,7 +1835,7 @@ export class TabManager {
       right.view.setBounds({
         x: leftWidth + SPLIT_GAP,
         y: this.chromeHeight(),
-        width: Math.max(width - leftWidth - SPLIT_GAP, 0),
+        width: Math.max(pageWidth - leftWidth - SPLIT_GAP, 0),
         height: contentHeight
       })
 
@@ -1164,7 +1846,7 @@ export class TabManager {
         splitter.setBounds({
           x: 0,
           y: this.chromeHeight(),
-          width,
+          width: pageWidth,
           height: contentHeight
         })
       } else {
@@ -1177,6 +1859,7 @@ export class TabManager {
       }
 
       this.window.contentView.addChildView(splitter)
+      this.layoutAiSidebar(pageWidth, contentHeight, width)
       this.layoutChrome()
       return
     }
@@ -1188,15 +1871,16 @@ export class TabManager {
       tab.view.setVisible(tabId === this.activeTabId)
     }
 
-    if (!active) return
+    if (active) {
+      active.view.setBounds({
+        x: 0,
+        y: this.chromeHeight(),
+        width: pageWidth,
+        height: contentHeight
+      })
+    }
 
-    active.view.setBounds({
-      x: 0,
-      y: this.chromeHeight(),
-      width,
-      height: contentHeight
-    })
-
+    this.layoutAiSidebar(pageWidth, contentHeight, width)
     this.layoutChrome()
   }
 
@@ -1210,6 +1894,7 @@ export class TabManager {
   }
 
   private pushClosedTab(tab: Tab): void {
+    if (tab.isIncognito) return
     const url = tab.errorUrl || tab.url
     if (isBlankUrl(url) || isErrorInterstitialUrl(url)) return
 

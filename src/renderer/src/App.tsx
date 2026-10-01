@@ -8,12 +8,17 @@ import { TabSearcher } from './components/TabSearcher'
 import { SavePasswordPrompt } from './components/SavePasswordPrompt'
 import { SplitDropOverlay } from './components/SplitDropOverlay'
 import { WindowControls } from './components/WindowControls'
+import { AiSidebar } from './components/AiSidebar'
 
 const emptyNav: NavState = {
   url: '',
   canGoBack: false,
   canGoForward: false
 }
+
+const isAiPanel =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('panel') === 'ai'
 
 export default function App(): React.JSX.Element {
   const [tabs, setTabs] = useState<TabInfo[]>([])
@@ -24,10 +29,21 @@ export default function App(): React.JSX.Element {
   const [tabSearchFocusKey, setTabSearchFocusKey] = useState(0)
   const [splitDraggingId, setSplitDraggingId] = useState<string | null>(null)
   const [fullScreen, setFullScreen] = useState(false)
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false)
   const splitDraggingIdRef = useRef<string | null>(null)
   const isMac = window.lockin.platform === 'darwin'
 
   useEffect(() => {
+    if (!isAiPanel) return
+    document.documentElement.classList.add('ai-panel')
+    return () => {
+      document.documentElement.classList.remove('ai-panel')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isAiPanel) return
+
     document.documentElement.dataset.platform = window.lockin.platform
 
     void window.lockin.getTabs().then(setTabs)
@@ -36,6 +52,7 @@ export default function App(): React.JSX.Element {
     const offTabs = window.lockin.onTabsUpdated(setTabs)
     const offNav = window.lockin.onNavState(setNav)
     const offFullScreen = window.lockin.onFullScreenChanged(setFullScreen)
+    const offAiSidebar = window.lockin.onAiSidebarOpenChanged(setAiSidebarOpen)
     const offFind = window.lockin.onOpenFind((open) => {
       document.documentElement.classList.toggle('find-open', open)
       setFindOpen(open)
@@ -59,22 +76,31 @@ export default function App(): React.JSX.Element {
       offTabs()
       offNav()
       offFullScreen()
+      offAiSidebar()
       offFind()
       offTabSearch()
     }
   }, [])
 
   useEffect(() => {
+    if (isAiPanel) return
     document.documentElement.classList.toggle('split-drag-active', Boolean(splitDraggingId))
   }, [splitDraggingId])
 
   useEffect(() => {
+    if (isAiPanel) return
     document.documentElement.classList.toggle('find-open', findOpen)
   }, [findOpen])
 
   useEffect(() => {
+    if (isAiPanel) return
     document.documentElement.classList.toggle('tab-search-open', tabSearchOpen)
   }, [tabSearchOpen])
+
+  useEffect(() => {
+    if (isAiPanel) return
+    void window.lockin.setAiSidebarOpen(aiSidebarOpen)
+  }, [aiSidebarOpen])
 
   const beginSplitDrag = (id: string): void => {
     splitDraggingIdRef.current = id
@@ -118,8 +144,25 @@ export default function App(): React.JSX.Element {
 
   const activeTab = tabs.find((tab) => tab.active)
 
+  useEffect(() => {
+    if (isAiPanel) return
+    document.documentElement.classList.toggle('incognito-active', Boolean(activeTab?.isIncognito))
+  }, [activeTab?.isIncognito])
+
+  if (isAiPanel) {
+    return (
+      <AiSidebar
+        onClose={() => void window.lockin.setAiSidebarOpen(false)}
+        onOpenSettings={() => {
+          void window.lockin.setAiSidebarOpen(false)
+          void window.lockin.navigate('lockin://settings')
+        }}
+      />
+    )
+  }
+
   return (
-    <div className="chrome">
+    <div className={['chrome', activeTab?.isIncognito ? 'chrome--incognito' : ''].filter(Boolean).join(' ')}>
       <header className="chrome-header">
         {isMac ? <WindowControls visible={fullScreen} /> : null}
         <TabBar
@@ -129,6 +172,12 @@ export default function App(): React.JSX.Element {
           onClose={(id) => void window.lockin.closeTab(id)}
           onReorder={(fromId, toId, position) =>
             void window.lockin.reorderTab(fromId, toId, position)
+          }
+          onOpenLink={(url, placement) =>
+            void window.lockin.createTab(url, {
+              isIncognito: activeTab?.isIncognito,
+              placement
+            })
           }
           onSplitDragStart={beginSplitDrag}
           onSplitDragEnd={endSplitDrag}
@@ -142,6 +191,8 @@ export default function App(): React.JSX.Element {
         favicon={activeTab?.favicon ?? null}
         canGoBack={nav.canGoBack}
         canGoForward={nav.canGoForward}
+        aiSidebarOpen={aiSidebarOpen}
+        onToggleAiSidebar={() => setAiSidebarOpen((open) => !open)}
         onBack={() => void window.lockin.goBack()}
         onForward={() => void window.lockin.goForward()}
         onReload={() => void window.lockin.reload()}

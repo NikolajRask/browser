@@ -88,9 +88,22 @@ export class HistoryStore {
     }
   }
 
-  list(): HistoryEntry[] {
+  list(options?: { offset?: number; limit?: number }): {
+    entries: HistoryEntry[]
+    total: number
+  } {
     this.ensureLoaded()
-    return this.entries.map((entry) => ({ ...entry }))
+    const total = this.entries.length
+    const offset = Math.max(0, Math.floor(options?.offset ?? 0))
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(0, Math.floor(options.limit))
+        : total
+
+    return {
+      entries: this.entries.slice(offset, offset + limit).map((entry) => ({ ...entry })),
+      total
+    }
   }
 
   add(visit: HistoryVisitInput): HistoryEntry | null {

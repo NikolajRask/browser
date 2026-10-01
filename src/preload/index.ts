@@ -1,8 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
+  AiChatChunk,
+  AiChatRequest,
+  AiChatSavePayload,
   BookmarkAddPayload,
   BookmarksState,
   ClosedTabInfo,
+  CreateTabOptions,
   DownloadEntry,
   DownloadsUpdatedPayload,
   FindResult,
@@ -24,6 +28,8 @@ const IpcChannels = {
   TABS_CLOSE: 'tabs:close',
   TABS_ACTIVATE: 'tabs:activate',
   TABS_REORDER: 'tabs:reorder',
+  TABS_CONTEXT_MENU: 'tabs:context-menu',
+  TABS_TOGGLE_MUTE: 'tabs:toggle-mute',
   TABS_CLOSED_LIST: 'tabs:closed-list',
   TABS_CLOSED_UPDATED: 'tabs:closed-updated',
   TABS_REOPEN_CLOSED: 'tabs:reopen-closed',
@@ -39,6 +45,22 @@ const IpcChannels = {
   NAV_STATE: 'nav:state',
   FOCUS_OMNIBOX: 'chrome:focus-omnibox',
   APP_MENU_OPEN: 'chrome:app-menu-open',
+  AI_SIDEBAR_OPEN: 'chrome:ai-sidebar-open',
+  AI_SIDEBAR_OPEN_CHANGED: 'chrome:ai-sidebar-open-changed',
+  AI_SIDEBAR_GET_WIDTH: 'chrome:ai-sidebar-get-width',
+  AI_SIDEBAR_WIDTH_CHANGED: 'chrome:ai-sidebar-width-changed',
+  AI_SIDEBAR_RESIZE_START: 'chrome:ai-sidebar-resize-start',
+  AI_SIDEBAR_RESIZE_MOVE: 'chrome:ai-sidebar-resize-move',
+  AI_SIDEBAR_RESIZE_END: 'chrome:ai-sidebar-resize-end',
+  AI_HAS_KEY: 'ai:has-key',
+  AI_CHAT: 'ai:chat',
+  AI_CHAT_CHUNK: 'ai:chat-chunk',
+  AI_CAPTURE_SCREENSHOT: 'ai:capture-screenshot',
+  AI_CHATS_LIST: 'ai:chats-list',
+  AI_CHATS_GET: 'ai:chats-get',
+  AI_CHATS_SAVE: 'ai:chats-save',
+  AI_CHATS_REMOVE: 'ai:chats-remove',
+  AI_CHATS_SET_PINNED: 'ai:chats-set-pinned',
   FIND_OPEN: 'find:open',
   FIND_SET_OPEN: 'find:set-open',
   FIND_QUERY: 'find:query',
@@ -74,6 +96,7 @@ const IpcChannels = {
   TODOS_REMOVE_TODO: 'todos:remove-todo',
   TODOS_OPEN_PAGE: 'todos:open-page',
   PAGE_PRINT: 'page:print',
+  PAGE_PICTURE_IN_PICTURE: 'page:picture-in-picture',
   WINDOW_FULLSCREEN: 'window:fullscreen',
   WINDOW_IS_FULLSCREEN: 'window:is-fullscreen',
   WINDOW_CLOSE: 'window:close',
@@ -84,11 +107,14 @@ const IpcChannels = {
 const api: LockinApi = {
   platform: process.platform,
   getTabs: () => ipcRenderer.invoke(IpcChannels.TABS_LIST),
-  createTab: (url?) => ipcRenderer.invoke(IpcChannels.TABS_CREATE, url),
+  createTab: (url?, options?: CreateTabOptions) =>
+    ipcRenderer.invoke(IpcChannels.TABS_CREATE, url, options),
   closeTab: (id) => ipcRenderer.invoke(IpcChannels.TABS_CLOSE, id),
   activateTab: (id) => ipcRenderer.invoke(IpcChannels.TABS_ACTIVATE, id),
   reorderTab: (fromId, toId, position) =>
     ipcRenderer.invoke(IpcChannels.TABS_REORDER, fromId, toId, position),
+  showTabContextMenu: (id) => ipcRenderer.invoke(IpcChannels.TABS_CONTEXT_MENU, id),
+  toggleMuteTab: (id) => ipcRenderer.invoke(IpcChannels.TABS_TOGGLE_MUTE, id),
   getClosedTabs: () => ipcRenderer.invoke(IpcChannels.TABS_CLOSED_LIST),
   reopenClosedTab: (index) => ipcRenderer.invoke(IpcChannels.TABS_REOPEN_CLOSED, index),
   beginSplitDrag: (tabId) => ipcRenderer.invoke(IpcChannels.SPLIT_DRAG_START, tabId),
@@ -100,6 +126,34 @@ const api: LockinApi = {
   reload: () => ipcRenderer.invoke(IpcChannels.NAV_RELOAD),
   navigate: (url) => ipcRenderer.invoke(IpcChannels.NAV_GO, url),
   setAppMenuOpen: (open) => ipcRenderer.invoke(IpcChannels.APP_MENU_OPEN, open),
+  setAiSidebarOpen: (open) => ipcRenderer.invoke(IpcChannels.AI_SIDEBAR_OPEN, open),
+  getAiSidebarWidth: () => ipcRenderer.invoke(IpcChannels.AI_SIDEBAR_GET_WIDTH),
+  startAiSidebarResize: () => {
+    ipcRenderer.send(IpcChannels.AI_SIDEBAR_RESIZE_START)
+  },
+  moveAiSidebarResize: (screenX) => {
+    ipcRenderer.send(IpcChannels.AI_SIDEBAR_RESIZE_MOVE, screenX)
+  },
+  endAiSidebarResize: () => {
+    ipcRenderer.send(IpcChannels.AI_SIDEBAR_RESIZE_END)
+  },
+  aiHasKey: () => ipcRenderer.invoke(IpcChannels.AI_HAS_KEY),
+  aiChat: (request: AiChatRequest) => ipcRenderer.invoke(IpcChannels.AI_CHAT, request),
+  onAiChatChunk: (callback) => {
+    const listener = (_event: IpcRendererEvent, chunk: AiChatChunk): void => {
+      callback(chunk)
+    }
+    ipcRenderer.on(IpcChannels.AI_CHAT_CHUNK, listener)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.AI_CHAT_CHUNK, listener)
+    }
+  },
+  captureAiScreenshot: () => ipcRenderer.invoke(IpcChannels.AI_CAPTURE_SCREENSHOT),
+  listAiChats: () => ipcRenderer.invoke(IpcChannels.AI_CHATS_LIST),
+  getAiChat: (id) => ipcRenderer.invoke(IpcChannels.AI_CHATS_GET, id),
+  saveAiChat: (payload: AiChatSavePayload) => ipcRenderer.invoke(IpcChannels.AI_CHATS_SAVE, payload),
+  removeAiChat: (id) => ipcRenderer.invoke(IpcChannels.AI_CHATS_REMOVE, id),
+  setAiChatPinned: (id, pinned) => ipcRenderer.invoke(IpcChannels.AI_CHATS_SET_PINNED, id, pinned),
   setFindOpen: (open) => ipcRenderer.invoke(IpcChannels.FIND_SET_OPEN, open),
   setTabSearchOpen: (open) => ipcRenderer.invoke(IpcChannels.TAB_SEARCH_SET_OPEN, open),
   findInPage: (query) => ipcRenderer.invoke(IpcChannels.FIND_QUERY, query),
@@ -133,6 +187,7 @@ const api: LockinApi = {
   removeTodo: (id: string) => ipcRenderer.invoke(IpcChannels.TODOS_REMOVE_TODO, id),
   openTodosPage: () => ipcRenderer.invoke(IpcChannels.TODOS_OPEN_PAGE),
   printPage: () => ipcRenderer.invoke(IpcChannels.PAGE_PRINT),
+  togglePictureInPicture: () => ipcRenderer.invoke(IpcChannels.PAGE_PICTURE_IN_PICTURE),
   isFullScreen: () => ipcRenderer.invoke(IpcChannels.WINDOW_IS_FULLSCREEN),
   closeWindow: () => ipcRenderer.invoke(IpcChannels.WINDOW_CLOSE),
   minimizeWindow: () => ipcRenderer.invoke(IpcChannels.WINDOW_MINIMIZE),
@@ -234,6 +289,24 @@ const api: LockinApi = {
     ipcRenderer.on(IpcChannels.TODOS_UPDATED, listener)
     return () => {
       ipcRenderer.removeListener(IpcChannels.TODOS_UPDATED, listener)
+    }
+  },
+  onAiSidebarOpenChanged: (callback) => {
+    const listener = (_event: IpcRendererEvent, open: boolean): void => {
+      callback(open)
+    }
+    ipcRenderer.on(IpcChannels.AI_SIDEBAR_OPEN_CHANGED, listener)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.AI_SIDEBAR_OPEN_CHANGED, listener)
+    }
+  },
+  onAiSidebarWidthChanged: (callback) => {
+    const listener = (_event: IpcRendererEvent, width: number): void => {
+      callback(width)
+    }
+    ipcRenderer.on(IpcChannels.AI_SIDEBAR_WIDTH_CHANGED, listener)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.AI_SIDEBAR_WIDTH_CHANGED, listener)
     }
   },
   onFullScreenChanged: (callback) => {

@@ -23,6 +23,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
           splitter: resolve(__dirname, 'src/preload/splitter.ts'),
+          'ai-resize': resolve(__dirname, 'src/preload/ai-resize.ts'),
           page: resolve(__dirname, 'src/preload/page.ts')
         }
       }

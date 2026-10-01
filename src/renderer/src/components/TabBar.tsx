@@ -1,5 +1,5 @@
 import { useRef, useState, type DragEvent } from 'react'
-import type { TabInfo } from '../../../shared/ipc'
+import type { CreateTabPlacement, TabInfo } from '../../../shared/ipc'
 import { Favicon } from './Favicon'
 
 type Props = {
@@ -8,6 +8,7 @@ type Props = {
   onActivate: (id: string) => void
   onClose: (id: string) => void
   onReorder: (fromId: string, toId: string, position: 'before' | 'after') => void
+  onOpenLink: (url: string, placement?: CreateTabPlacement) => void
   onSplitDragStart: (id: string) => void
   onSplitDragEnd: () => void
   onSearchTabs?: () => void
@@ -19,12 +20,37 @@ type DropTarget = {
   position: 'before' | 'after'
 }
 
+const TAB_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function isLinkDragEvent(event: DragEvent<HTMLElement>): boolean {
+  const types = Array.from(event.dataTransfer?.types ?? [])
+  return types.includes('text/uri-list') || types.includes('URL') || types.includes('text/plain')
+}
+
+function readLinkUrl(dataTransfer: DataTransfer): string | null {
+  const uriList = dataTransfer.getData('text/uri-list')
+  if (uriList) {
+    const line = uriList.split(/\r?\n/).find((entry) => entry && !entry.startsWith('#'))
+    if (line) {
+      const url = line.trim()
+      if (url && !TAB_ID_RE.test(url)) return url
+    }
+  }
+
+  const plain = dataTransfer.getData('text/plain').trim()
+  if (!plain || TAB_ID_RE.test(plain)) return null
+  if (plain.includes('://') || plain.startsWith('lockin:')) return plain
+  return null
+}
+
 export function TabBar({
   tabs,
   onCreate,
   onActivate,
   onClose,
   onReorder,
+  onOpenLink,
   onSplitDragStart,
   onSplitDragEnd,
   onSearchTabs,
@@ -32,6 +58,7 @@ export function TabBar({
 }: Props): React.JSX.Element {
   const dragIdRef = useRef<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [linkDragging, setLinkDragging] = useState(false)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
 
   const lastTab = tabs.at(-1) ?? null
@@ -40,6 +67,7 @@ export function TabBar({
   const clearDragState = (): void => {
     dragIdRef.current = null
     setDraggingId(null)
+    setLinkDragging(false)
     setDropTarget(null)
     onSplitDragEnd()
   }
@@ -48,6 +76,16 @@ export function TabBar({
     setDropTarget((current) =>
       current?.id === id && current.position === position ? current : { id, position }
     )
+  }
+
+  const dropPositionForTab = (
+    event: DragEvent<HTMLElement>,
+    id: string
+  ): 'before' | 'after' => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const isLast = lastTab?.id === id
+    const threshold = isLast ? bounds.left + bounds.width * 0.25 : bounds.left + bounds.width / 2
+    return event.clientX < threshold ? 'before' : 'after'
   }
 
   const onDragStart = (event: DragEvent<HTMLDivElement>, id: string): void => {
@@ -65,69 +103,144 @@ export function TabBar({
   const onDragOverTab = (event: DragEvent<HTMLDivElement>, id: string): void => {
     event.preventDefault()
     event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
 
     const fromId = dragIdRef.current
-    if (!fromId || fromId === id) {
+    if (fromId) {
+      event.dataTransfer.dropEffect = 'move'
+      if (fromId === id) {
+        setDropTarget(null)
+        return
+      }
+      setTarget(id, dropPositionForTab(event, id))
+      return
+    }
+
+    if (!isLinkDragEvent(event)) {
       setDropTarget(null)
       return
     }
 
-    const bounds = event.currentTarget.getBoundingClientRect()
-    const isLast = lastTab?.id === id
-    const threshold = isLast ? bounds.left + bounds.width * 0.25 : bounds.left + bounds.width / 2
-    const position = event.clientX < threshold ? 'before' : 'after'
-    setTarget(id, position)
+    event.dataTransfer.dropEffect = 'copy'
+    setLinkDragging(true)
+    setTarget(id, dropPositionForTab(event, id))
   }
 
   const onDropOnTab = (event: DragEvent<HTMLDivElement>, id: string): void => {
     event.preventDefault()
     event.stopPropagation()
+
     const fromId = dragIdRef.current ?? event.dataTransfer.getData('text/plain')
-    if (!fromId || fromId === id) {
+    if (fromId && TAB_ID_RE.test(fromId)) {
+      if (fromId !== id) {
+        onReorder(fromId, id, dropPositionForTab(event, id))
+      }
       clearDragState()
       return
     }
 
-    const bounds = event.currentTarget.getBoundingClientRect()
-    const isLast = lastTab?.id === id
-    const threshold = isLast ? bounds.left + bounds.width * 0.25 : bounds.left + bounds.width / 2
-    const position = event.clientX < threshold ? 'before' : 'after'
-    onReorder(fromId, id, position)
+    const url = readLinkUrl(event.dataTransfer)
+    if (!url) {
+      clearDragState()
+      return
+    }
+
+    onOpenLink(url, { tabId: id, position: dropPositionForTab(event, id) })
     clearDragState()
   }
 
   const onDragOverEnd = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault()
     event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
 
     const fromId = dragIdRef.current
-    if (!fromId || !lastTab || fromId === lastTab.id) {
+    if (fromId) {
+      event.dataTransfer.dropEffect = 'move'
+      if (!lastTab || fromId === lastTab.id) {
+        setDropTarget(null)
+        return
+      }
+      setTarget(lastTab.id, 'after')
+      return
+    }
+
+    if (!isLinkDragEvent(event)) {
       setDropTarget(null)
       return
     }
 
-    setTarget(lastTab.id, 'after')
+    event.dataTransfer.dropEffect = 'copy'
+    setLinkDragging(true)
+    if (lastTab) {
+      setTarget(lastTab.id, 'after')
+    }
   }
 
   const onDropOnEnd = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault()
     event.stopPropagation()
+
     const fromId = dragIdRef.current ?? event.dataTransfer.getData('text/plain')
-    if (!fromId || !lastTab || fromId === lastTab.id) {
+    if (fromId && TAB_ID_RE.test(fromId) && lastTab && fromId !== lastTab.id) {
+      onReorder(fromId, lastTab.id, 'after')
       clearDragState()
       return
     }
 
-    onReorder(fromId, lastTab.id, 'after')
+    const url = readLinkUrl(event.dataTransfer)
+    if (!url) {
+      clearDragState()
+      return
+    }
+
+    if (lastTab) {
+      onOpenLink(url, { tabId: lastTab.id, position: 'after' })
+    } else {
+      onOpenLink(url)
+    }
+    clearDragState()
+  }
+
+  const onDragOverBar = (event: DragEvent<HTMLDivElement>): void => {
+    if (dragIdRef.current || !isLinkDragEvent(event)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    setLinkDragging(true)
+    if (lastTab) {
+      setTarget(lastTab.id, 'after')
+    }
+  }
+
+  const onDropOnBar = (event: DragEvent<HTMLDivElement>): void => {
+    if (dragIdRef.current) return
+    const url = readLinkUrl(event.dataTransfer)
+    if (!url) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (lastTab && dropTarget) {
+      onOpenLink(url, { tabId: dropTarget.id, position: dropTarget.position })
+    } else {
+      onOpenLink(url)
+    }
     clearDragState()
   }
 
   return (
     <div
-      className={['tab-bar', draggingId ? 'tab-bar--reordering' : ''].filter(Boolean).join(' ')}
+      className={[
+        'tab-bar',
+        draggingId || linkDragging ? 'tab-bar--reordering' : '',
+        activeTab?.isIncognito ? 'tab-bar--incognito' : ''
+      ]
+        .filter(Boolean)
+        .join(' ')}
       role="tablist"
+      onDragOver={onDragOverBar}
+      onDrop={onDropOnBar}
+      onDragLeave={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+        setLinkDragging(false)
+        setDropTarget(null)
+      }}
     >
       <div className="tabs">
         {tabs.map((tab) => {
@@ -139,11 +252,13 @@ export function TabBar({
               key={tab.id}
               role="tab"
               aria-selected={tab.active}
+              aria-label={tab.isIncognito ? `${tab.title || 'New Tab'} (Incognito)` : undefined}
               draggable
               className={[
                 'tab',
                 tab.active ? 'tab--active' : '',
                 tab.splitSide ? 'tab--split' : '',
+                tab.isIncognito ? 'tab--incognito' : '',
                 draggingId === tab.id ? 'tab--dragging' : '',
                 isDropBefore ? 'tab--drop-before' : '',
                 isDropAfter ? 'tab--drop-after' : ''
@@ -151,6 +266,11 @@ export function TabBar({
                 .filter(Boolean)
                 .join(' ')}
               onClick={() => onActivate(tab.id)}
+              onContextMenu={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                void window.lockin.showTabContextMenu(tab.id)
+              }}
               onDragStart={(event) => onDragStart(event, tab.id)}
               onDragOver={(event) => onDragOverTab(event, tab.id)}
               onDragLeave={() => {
@@ -159,10 +279,55 @@ export function TabBar({
               onDrop={(event) => onDropOnTab(event, tab.id)}
               onDragEnd={clearDragState}
             >
-              <Favicon src={tab.favicon} />
+              {tab.isIncognito ? (
+                <span className="tab-incognito-icon" aria-hidden="true" title="Incognito">
+                  <svg viewBox="0 0 16 16" width="14" height="14">
+                    <path
+                      d="M8 2.2c1.6 0 2.9 1.1 3.2 2.6h.9c.7 0 1.2.6 1.1 1.3l-.4 2.2c-.3 1.5-1.6 2.6-3.1 2.6H6.3c-1.5 0-2.8-1.1-3.1-2.6L2.8 6.1c-.1-.7.4-1.3 1.1-1.3h.9C5.1 3.3 6.4 2.2 8 2.2Z"
+                      fill="currentColor"
+                      opacity="0.9"
+                    />
+                    <circle cx="5.6" cy="7.4" r="1.15" fill="#fff" />
+                    <circle cx="10.4" cy="7.4" r="1.15" fill="#fff" />
+                    <path
+                      d="M4.2 12.2c1.1.9 2.4 1.4 3.8 1.4s2.7-.5 3.8-1.4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.3"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </span>
+              ) : (
+                <Favicon src={tab.favicon} />
+              )}
               <span className="tab-title" title={tab.title}>
                 {tab.title || 'New Tab'}
               </span>
+              {tab.isMuted ? (
+                <button
+                  type="button"
+                  className="tab-mute"
+                  aria-label={`Unmute ${tab.title || 'tab'}`}
+                  title="Unmute tab"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void window.lockin.toggleMuteTab(tab.id)
+                  }}
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                    <path d="M3 6.5v3h2.2L8.5 12V4L5.2 6.5H3Z" fill="currentColor" />
+                    <path
+                      d="M3.5 3.5l9 9"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="tab-close"

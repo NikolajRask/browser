@@ -1,4 +1,4 @@
-import { app, BaseWindow, WebContentsView, shell, protocol } from 'electron'
+import { app, BaseWindow, WebContentsView, shell, protocol, type Session } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { registerIpc, unregisterIpc } from './ipc'
@@ -10,6 +10,8 @@ import { DownloadsStore } from './downloads-store'
 import { DownloadManager } from './download-manager'
 import { PasswordStore } from './password-store'
 import { PasswordManager } from './password-manager'
+import { ApiKeyStore } from './api-key-store'
+import { AiChatStore } from './ai-chat-store'
 import { SessionStore } from './session-store'
 import { ScreenTimeStore } from './screentime-store'
 import { ScreenTimeTracker } from './screentime-tracker'
@@ -21,9 +23,14 @@ import { BOOKMARKS_PAGE_HTML } from './bookmarks-page'
 import { TODOS_PAGE_HTML } from './todos-page'
 import { SETTINGS_PAGE_HTML } from './settings-page'
 import { NEWTAB_PAGE_HTML } from './newtab-page'
+import { INCOGNITO_NEWTAB_PAGE_HTML } from './incognito-newtab-page'
 import {
   configureBrowserSession,
+  configureIncognitoSession,
   flushBrowserSession,
+  clearIncognitoSession,
+  getBrowserSession,
+  getIncognitoSession,
   stripElectronFromUserAgent
 } from './browser-session'
 import { CHROME_HEIGHT, IpcChannels, type BookmarksState, type TodosState } from '../shared/ipc'
@@ -54,12 +61,14 @@ let downloadsStore: DownloadsStore | null = null
 let downloadManager: DownloadManager | null = null
 let passwordStore: PasswordStore | null = null
 let passwordManager: PasswordManager | null = null
+let apiKeyStore: ApiKeyStore | null = null
+let aiChatStore: AiChatStore | null = null
 let sessionStore: SessionStore | null = null
 let screenTimeStore: ScreenTimeStore | null = null
 let screenTimeTracker: ScreenTimeTracker | null = null
 
-function registerLockinProtocol(): void {
-  protocol.handle('lockin', (request) => {
+function registerLockinProtocolOnSession(ses: Session, options: { incognito: boolean }): void {
+  ses.protocol.handle('lockin', (request) => {
     let hostname = ''
     try {
       hostname = new URL(request.url).hostname
@@ -117,7 +126,7 @@ function registerLockinProtocol(): void {
     }
 
     if (hostname === 'newtab') {
-      return new Response(NEWTAB_PAGE_HTML, {
+      return new Response(options.incognito ? INCOGNITO_NEWTAB_PAGE_HTML : NEWTAB_PAGE_HTML, {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' }
       })
@@ -125,6 +134,19 @@ function registerLockinProtocol(): void {
 
     return new Response('Not Found', { status: 404, headers: { 'content-type': 'text/plain' } })
   })
+}
+
+function registerLockinProtocol(): void {
+  // Prefer session-scoped handlers so Incognito's temp partition can load lockin:// pages.
+  // Fall back to the global protocol API if a session rejects a second registration.
+  try {
+    protocol.unhandle('lockin')
+  } catch {
+    // Not registered globally yet.
+  }
+
+  registerLockinProtocolOnSession(getBrowserSession(), { incognito: false })
+  registerLockinProtocolOnSession(getIncognitoSession(), { incognito: true })
 }
 
 function createWindow(): void {
@@ -167,7 +189,7 @@ function createWindow(): void {
 
   const isWindowFullScreen = (): boolean => {
     if (!mainWindow || mainWindow.isDestroyed()) return false
-    return mainWindow.isFullScreen()
+    return mainWindow.isFullScreen() || (isMac && mainWindow.isSimpleFullScreen())
   }
 
   const broadcastFullScreen = (fullScreen: boolean): void => {
@@ -175,13 +197,47 @@ function createWindow(): void {
     chromeView.webContents.send(IpcChannels.WINDOW_FULLSCREEN, fullScreen)
   }
 
+  const exitSimpleFullScreen = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isSimpleFullScreen()) return
+    mainWindow.setSimpleFullScreen(false)
+    mainWindow.setWindowButtonVisibility(true)
+    mainWindow.setWindowButtonPosition(trafficLightPosition)
+    broadcastFullScreen(false)
+  }
+
+  const enterSimpleFullScreen = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.setSimpleFullScreen(true)
+    mainWindow.setWindowButtonVisibility(false)
+    broadcastFullScreen(true)
+  }
+
   const toggleFullScreen = (): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return
-    mainWindow.setFullScreen(!mainWindow.isFullScreen())
+
+    // Leaving any fullscreen mode.
+    if (mainWindow.isSimpleFullScreen()) {
+      exitSimpleFullScreen()
+      return
+    }
+    if (mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false)
+      return
+    }
+
+    // Entering fullscreen: keep PiP visible by filling the screen in-place
+    // instead of macOS Space fullscreen when a PiP window is already open.
+    if (isMac && tabManager?.isPictureInPictureActive()) {
+      enterSimpleFullScreen()
+      return
+    }
+
+    mainWindow.setFullScreen(true)
   }
 
   // macOS native fullscreen hides the system traffic lights. Keep the window in
   // native fullscreen (no bounce) and paint HTML controls in the tab strip instead.
+  // When PiP is already active, toggleFullScreen uses simple fullscreen instead.
   if (isMac) {
     mainWindow.on('enter-full-screen', () => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -191,8 +247,20 @@ function createWindow(): void {
 
     mainWindow.on('leave-full-screen', () => {
       if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isSimpleFullScreen()) {
+        mainWindow.setWindowButtonVisibility(false)
+        broadcastFullScreen(true)
+        return
+      }
       mainWindow.setWindowButtonVisibility(true)
       mainWindow.setWindowButtonPosition(trafficLightPosition)
+      broadcastFullScreen(false)
+    })
+  } else {
+    mainWindow.on('enter-full-screen', () => {
+      broadcastFullScreen(true)
+    })
+    mainWindow.on('leave-full-screen', () => {
       broadcastFullScreen(false)
     })
   }
@@ -202,6 +270,8 @@ function createWindow(): void {
   todoStore = new TodoStore()
   downloadsStore = new DownloadsStore()
   passwordStore = new PasswordStore()
+  apiKeyStore = new ApiKeyStore()
+  aiChatStore = new AiChatStore()
   sessionStore = new SessionStore()
   screenTimeStore = new ScreenTimeStore()
   screenTimeTracker = new ScreenTimeTracker(screenTimeStore, mainWindow)
@@ -295,6 +365,8 @@ function createWindow(): void {
     screenTimeStore,
     bookmarkStore,
     todoStore,
+    apiKeyStore,
+    aiChatStore,
     screenTimeTracker,
     {
       isFullScreen: isWindowFullScreen,
@@ -332,16 +404,14 @@ function createWindow(): void {
     downloadManager = null
     passwordStore = null
     passwordManager = null
+    apiKeyStore = null
+    aiChatStore = null
     sessionStore = null
     screenTimeStore = null
     screenTimeTracker = null
   })
 
   chromeView.webContents.once('did-finish-load', () => {
-    // Clear any leftover simple-fullscreen state from earlier experiments.
-    if (isMac && mainWindow && !mainWindow.isDestroyed() && mainWindow.isSimpleFullScreen()) {
-      mainWindow.setSimpleFullScreen(false)
-    }
     mainWindow?.show()
     tabManager?.restoreSession()
     broadcastFullScreen(isWindowFullScreen())
@@ -359,6 +429,7 @@ app.whenReady().then(() => {
     app.configureWebAuthn({ platformPasskeys: true })
   }
   configureBrowserSession()
+  configureIncognitoSession()
   registerLockinProtocol()
   createWindow()
 
@@ -373,6 +444,7 @@ app.on('before-quit', () => {
   screenTimeTracker?.flush(false)
   tabManager?.persistSession()
   flushBrowserSession()
+  void clearIncognitoSession()
 })
 
 app.on('window-all-closed', () => {

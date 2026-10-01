@@ -1,10 +1,80 @@
 export const BOOKMARKS_BAR_HEIGHT = 28
+/** Height of the tab strip row (`.chrome-header`). */
+export const TAB_ROW_HEIGHT = 38
 /** Tab strip + nav bar only. Bookmarks bar is added when visible. */
 export const CHROME_HEIGHT = 78
 export const APP_MENU_OVERLAY = 560
 export const FIND_BAR_OVERLAY = 48
 export const TAB_SEARCH_OVERLAY = 420
 export const SPLIT_GAP = 6
+export const AI_SIDEBAR_WIDTH = 360
+export const AI_SIDEBAR_MIN_WIDTH = 280
+export const AI_SIDEBAR_MAX_WIDTH = 640
+
+export type AiChatRole = 'user' | 'assistant'
+
+export type AiChatMessage = {
+  role: AiChatRole
+  content: string
+}
+
+export type AiChatScreenshot = {
+  id: string
+  imageBase64: string
+  mediaType: 'image/jpeg'
+  title: string
+  url: string
+  capturedAt: number
+}
+
+export type AiChatRequest = {
+  messages: AiChatMessage[]
+  /** When present and non-empty, these images are sent and auto page-screenshot routing is skipped. */
+  screenshots?: AiChatScreenshot[]
+}
+
+export type AiChatResponse = {
+  text: string
+}
+
+export type AiChatError = {
+  error: string
+}
+
+export type AiChatChunk = {
+  text: string
+}
+
+export type AiChatStoredRole = 'user' | 'assistant' | 'error'
+
+export type AiChatStoredMessage = {
+  id: string
+  role: AiChatStoredRole
+  content: string
+  screenshots?: AiChatScreenshot[]
+}
+
+export type AiChatSessionSummary = {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  pinned: boolean
+}
+
+export type AiChatSession = AiChatSessionSummary & {
+  messages: AiChatStoredMessage[]
+}
+
+export type AiChatSavePayload = {
+  id?: string
+  title?: string
+  messages: AiChatStoredMessage[]
+}
+
+export type ClaudeKeyStatus = {
+  configured: boolean
+}
 
 export type FindResult = {
   activeMatchOrdinal: number
@@ -22,6 +92,18 @@ export type TabInfo = {
   active: boolean
   splitSide: SplitSide | null
   lastAccessed: number
+  isIncognito: boolean
+  isMuted: boolean
+}
+
+export type CreateTabPlacement = {
+  tabId: string
+  position: 'before' | 'after'
+}
+
+export type CreateTabOptions = {
+  isIncognito?: boolean
+  placement?: CreateTabPlacement
 }
 
 export type ClosedTabInfo = {
@@ -175,6 +257,8 @@ export const IpcChannels = {
   TABS_CLOSE: 'tabs:close',
   TABS_ACTIVATE: 'tabs:activate',
   TABS_REORDER: 'tabs:reorder',
+  TABS_CONTEXT_MENU: 'tabs:context-menu',
+  TABS_TOGGLE_MUTE: 'tabs:toggle-mute',
   TABS_CLOSED_LIST: 'tabs:closed-list',
   TABS_CLOSED_UPDATED: 'tabs:closed-updated',
   TABS_REOPEN_CLOSED: 'tabs:reopen-closed',
@@ -193,6 +277,25 @@ export const IpcChannels = {
   NAV_STATE: 'nav:state',
   FOCUS_OMNIBOX: 'chrome:focus-omnibox',
   APP_MENU_OPEN: 'chrome:app-menu-open',
+  AI_SIDEBAR_OPEN: 'chrome:ai-sidebar-open',
+  AI_SIDEBAR_OPEN_CHANGED: 'chrome:ai-sidebar-open-changed',
+  AI_SIDEBAR_GET_WIDTH: 'chrome:ai-sidebar-get-width',
+  AI_SIDEBAR_WIDTH_CHANGED: 'chrome:ai-sidebar-width-changed',
+  AI_SIDEBAR_RESIZE_START: 'chrome:ai-sidebar-resize-start',
+  AI_SIDEBAR_RESIZE_MOVE: 'chrome:ai-sidebar-resize-move',
+  AI_SIDEBAR_RESIZE_END: 'chrome:ai-sidebar-resize-end',
+  AI_HAS_KEY: 'ai:has-key',
+  AI_CHAT: 'ai:chat',
+  AI_CHAT_CHUNK: 'ai:chat-chunk',
+  AI_CAPTURE_SCREENSHOT: 'ai:capture-screenshot',
+  AI_CHATS_LIST: 'ai:chats-list',
+  AI_CHATS_GET: 'ai:chats-get',
+  AI_CHATS_SAVE: 'ai:chats-save',
+  AI_CHATS_REMOVE: 'ai:chats-remove',
+  AI_CHATS_SET_PINNED: 'ai:chats-set-pinned',
+  SETTINGS_CLAUDE_STATUS: 'settings:claude-status',
+  SETTINGS_CLAUDE_SET: 'settings:claude-set',
+  SETTINGS_CLAUDE_CLEAR: 'settings:claude-clear',
   FIND_OPEN: 'find:open',
   FIND_SET_OPEN: 'find:set-open',
   FIND_QUERY: 'find:query',
@@ -251,6 +354,9 @@ export const IpcChannels = {
   TODOS_MOVE_TODO: 'todos:move-todo',
   TODOS_OPEN_PAGE: 'todos:open-page',
   PAGE_PRINT: 'page:print',
+  PAGE_LINK_DRAG: 'page:link-drag',
+  PAGE_PICTURE_IN_PICTURE: 'page:picture-in-picture',
+  PAGE_PICTURE_IN_PICTURE_CHANGED: 'page:picture-in-picture-changed',
   WINDOW_FULLSCREEN: 'window:fullscreen',
   WINDOW_IS_FULLSCREEN: 'window:is-fullscreen',
   WINDOW_CLOSE: 'window:close',
@@ -305,21 +411,30 @@ export type ScreenTimeDay = {
 export type ScreenTimeOrigin = {
   origin: string
   ms: number
+  streakDays: number
+}
+
+export type ScreenTimeStreak = {
+  origin: string
+  streakDays: number
 }
 
 export type ScreenTimeSummary = {
   todayTotalMs: number
   days: ScreenTimeDay[]
   topOrigins: ScreenTimeOrigin[]
+  streaks: ScreenTimeStreak[]
 }
 
 export type LockinApi = {
   platform: 'darwin' | 'win32' | 'linux' | string
   getTabs: () => Promise<TabInfo[]>
-  createTab: (url?: string) => Promise<void>
+  createTab: (url?: string, options?: CreateTabOptions) => Promise<void>
   closeTab: (id: string) => Promise<void>
   activateTab: (id: string) => Promise<void>
   reorderTab: (fromId: string, toId: string, position: 'before' | 'after') => Promise<void>
+  showTabContextMenu: (id: string) => Promise<void>
+  toggleMuteTab: (id: string) => Promise<void>
   getClosedTabs: () => Promise<ClosedTabInfo[]>
   reopenClosedTab: (index: number) => Promise<void>
   beginSplitDrag: (tabId: string) => Promise<void>
@@ -330,6 +445,20 @@ export type LockinApi = {
   reload: () => Promise<void>
   navigate: (url: string) => Promise<void>
   setAppMenuOpen: (open: boolean) => Promise<void>
+  setAiSidebarOpen: (open: boolean) => Promise<void>
+  getAiSidebarWidth: () => Promise<number>
+  startAiSidebarResize: () => void
+  moveAiSidebarResize: (screenX: number) => void
+  endAiSidebarResize: () => void
+  aiHasKey: () => Promise<boolean>
+  aiChat: (request: AiChatRequest) => Promise<AiChatResponse | AiChatError>
+  onAiChatChunk: (callback: (chunk: AiChatChunk) => void) => () => void
+  captureAiScreenshot: () => Promise<AiChatScreenshot | null>
+  listAiChats: () => Promise<AiChatSessionSummary[]>
+  getAiChat: (id: string) => Promise<AiChatSession | null>
+  saveAiChat: (payload: AiChatSavePayload) => Promise<AiChatSession | null>
+  removeAiChat: (id: string) => Promise<boolean>
+  setAiChatPinned: (id: string, pinned: boolean) => Promise<boolean>
   setFindOpen: (open: boolean) => Promise<void>
   setTabSearchOpen: (open: boolean) => Promise<void>
   findInPage: (query: string) => Promise<void>
@@ -360,6 +489,7 @@ export type LockinApi = {
   removeTodo: (id: string) => Promise<boolean>
   openTodosPage: () => Promise<void>
   printPage: () => Promise<void>
+  togglePictureInPicture: () => Promise<void>
   isFullScreen: () => Promise<boolean>
   closeWindow: () => Promise<void>
   minimizeWindow: () => Promise<void>
@@ -375,5 +505,7 @@ export type LockinApi = {
   onPasswordSavePrompt: (callback: (prompt: PasswordSavePrompt | null) => void) => () => void
   onBookmarksUpdated: (callback: (state: BookmarksState) => void) => () => void
   onTodosUpdated: (callback: (state: TodosState) => void) => () => void
+  onAiSidebarOpenChanged: (callback: (open: boolean) => void) => () => void
+  onAiSidebarWidthChanged: (callback: (width: number) => void) => () => void
   onFullScreenChanged: (callback: (fullScreen: boolean) => void) => () => void
 }

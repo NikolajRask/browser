@@ -257,6 +257,32 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
         font-size: 13px;
         color: var(--text-muted);
         white-space: nowrap;
+        text-align: right;
+      }
+
+      .site-time-main {
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      .site-streak {
+        margin-top: 2px;
+        font-size: 12px;
+        font-weight: 550;
+        color: var(--accent);
+      }
+
+      .streak-days {
+        font-size: 15px;
+        font-weight: 650;
+        color: var(--accent);
+        white-space: nowrap;
+      }
+
+      .streak-label {
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--text-muted);
       }
 
       .empty {
@@ -264,6 +290,10 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
         text-align: center;
         color: var(--text-muted);
         font-size: 14px;
+      }
+
+      .empty.section-empty {
+        padding: 24px 8px;
       }
     </style>
   </head>
@@ -335,6 +365,11 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
         }
       }
 
+      const formatStreak = (days) => {
+        if (!days || days <= 0) return ''
+        return days === 1 ? '1-day streak' : days + '-day streak'
+      }
+
       const hasAnyTime = (summary) => {
         if (summary.todayTotalMs > 0) return true
         return summary.days.some((day) => day.totalMs > 0)
@@ -355,6 +390,7 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
 
         const maxDay = Math.max(1, ...summary.days.map((day) => day.totalMs))
         const maxOrigin = Math.max(1, ...summary.topOrigins.map((item) => item.ms))
+        const streaks = Array.isArray(summary.streaks) ? summary.streaks : []
 
         const chartHtml =
           '<div class="section">' +
@@ -387,7 +423,7 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
 
         const sitesHtml =
           summary.topOrigins.length === 0
-            ? '<div class="section"><h2 class="section-title">Top sites today</h2><div class="empty" style="padding:24px 8px">No sites yet today</div></div>'
+            ? '<div class="section"><h2 class="section-title">Top sites today</h2><div class="empty section-empty">No sites yet today</div></div>'
             : '<div class="section">' +
               '<h2 class="section-title">Top sites today</h2>' +
               '<ul class="sites">' +
@@ -396,6 +432,7 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
                   const host = hostFromOrigin(item.origin)
                   const letter = (host || '?').charAt(0).toUpperCase()
                   const pct = Math.round((item.ms / maxOrigin) * 100)
+                  const streakText = formatStreak(item.streakDays)
                   return (
                     '<li class="site">' +
                     '<div class="site-favicon" aria-hidden="true">' +
@@ -410,7 +447,47 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
                     '%"></div></div>' +
                     '</div>' +
                     '<div class="site-time">' +
+                    '<div class="site-time-main">' +
                     escapeHtml(formatDuration(item.ms)) +
+                    '</div>' +
+                    (streakText
+                      ? '<div class="site-streak">' + escapeHtml(streakText) + '</div>'
+                      : '') +
+                    '</div>' +
+                    '</li>'
+                  )
+                })
+                .join('') +
+              '</ul></div>'
+
+        const streaksHtml =
+          streaks.length === 0
+            ? '<div class="section"><h2 class="section-title">Site streaks</h2><div class="empty section-empty">Visit the same sites on consecutive days to build streaks.</div></div>'
+            : '<div class="section">' +
+              '<h2 class="section-title">Site streaks</h2>' +
+              '<ul class="sites">' +
+              streaks
+                .map((item) => {
+                  const host = hostFromOrigin(item.origin)
+                  const letter = (host || '?').charAt(0).toUpperCase()
+                  const days = item.streakDays
+                  return (
+                    '<li class="site">' +
+                    '<div class="site-favicon" aria-hidden="true">' +
+                    escapeHtml(letter) +
+                    '</div>' +
+                    '<div class="site-meta">' +
+                    '<div class="site-host">' +
+                    escapeHtml(host) +
+                    '</div>' +
+                    '</div>' +
+                    '<div class="site-time">' +
+                    '<div class="streak-days">' +
+                    escapeHtml(String(days)) +
+                    '</div>' +
+                    '<div class="streak-label">' +
+                    escapeHtml(days === 1 ? 'day' : 'days') +
+                    '</div>' +
                     '</div>' +
                     '</li>'
                   )
@@ -426,6 +503,7 @@ export const SCREENTIME_PAGE_HTML = `<!doctype html>
           '</p>' +
           '</div>' +
           chartHtml +
+          streaksHtml +
           sitesHtml
       }
 

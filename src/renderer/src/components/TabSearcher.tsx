@@ -204,7 +204,12 @@ export function TabSearcher({ open, focusKey, tabs, onClose }: Props): React.JSX
                       >
                         <Favicon src={tab.favicon} className="tab-searcher-favicon" size={16} />
                         <span className="tab-searcher-text">
-                          <span className="tab-searcher-title">{tab.title || 'New Tab'}</span>
+                          <span className="tab-searcher-title">
+                            {tab.title || 'New Tab'}
+                            {tab.isIncognito ? (
+                              <span className="tab-searcher-incognito-badge">Incognito</span>
+                            ) : null}
+                          </span>
                           <span className="tab-searcher-meta">
                             {[hostnameOf(tab.url), formatRelativeTime(tab.lastAccessed)]
                               .filter(Boolean)

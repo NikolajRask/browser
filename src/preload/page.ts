@@ -42,7 +42,12 @@ const IpcChannels = {
   TODOS_TOGGLE_TODO: 'todos:toggle-todo',
   TODOS_RENAME_TODO: 'todos:rename-todo',
   TODOS_REMOVE_TODO: 'todos:remove-todo',
-  TODOS_MOVE_TODO: 'todos:move-todo'
+  TODOS_MOVE_TODO: 'todos:move-todo',
+  PAGE_LINK_DRAG: 'page:link-drag',
+  PAGE_PICTURE_IN_PICTURE_CHANGED: 'page:picture-in-picture-changed',
+  SETTINGS_CLAUDE_STATUS: 'settings:claude-status',
+  SETTINGS_CLAUDE_SET: 'settings:claude-set',
+  SETTINGS_CLAUDE_CLEAR: 'settings:claude-clear'
 } as const
 
 export type HistoryEntry = {
@@ -100,12 +105,19 @@ export type ScreenTimeDay = {
 export type ScreenTimeOrigin = {
   origin: string
   ms: number
+  streakDays: number
+}
+
+export type ScreenTimeStreak = {
+  origin: string
+  streakDays: number
 }
 
 export type ScreenTimeSummary = {
   todayTotalMs: number
   days: ScreenTimeDay[]
   topOrigins: ScreenTimeOrigin[]
+  streaks: ScreenTimeStreak[]
 }
 
 export type BookmarkFolderNode = {
@@ -166,7 +178,11 @@ export type TodosState = {
 }
 
 contextBridge.exposeInMainWorld('lockinHistory', {
-  list: (): Promise<HistoryEntry[]> => ipcRenderer.invoke(IpcChannels.HISTORY_LIST),
+  list: (options?: {
+    offset?: number
+    limit?: number
+  }): Promise<{ entries: HistoryEntry[]; total: number }> =>
+    ipcRenderer.invoke(IpcChannels.HISTORY_LIST, options),
   remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.HISTORY_REMOVE, id),
   clear: (range?: HistoryClearRange): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.HISTORY_CLEAR, range ?? 'all'),
@@ -268,6 +284,15 @@ contextBridge.exposeInMainWorld('lockinTodos', {
       ipcRenderer.removeListener(IpcChannels.TODOS_UPDATED, listener)
     }
   }
+})
+
+contextBridge.exposeInMainWorld('lockinSettings', {
+  claudeStatus: (): Promise<{ configured: boolean }> =>
+    ipcRenderer.invoke(IpcChannels.SETTINGS_CLAUDE_STATUS),
+  setClaudeKey: (key: string): Promise<{ configured: boolean }> =>
+    ipcRenderer.invoke(IpcChannels.SETTINGS_CLAUDE_SET, key),
+  clearClaudeKey: (): Promise<{ configured: boolean }> =>
+    ipcRenderer.invoke(IpcChannels.SETTINGS_CLAUDE_CLEAR)
 })
 
 const USERNAME_TYPES = new Set(['text', 'email', 'tel', 'url', 'search', ''])
@@ -725,3 +750,60 @@ if (document.readyState === 'loading') {
 } else {
   installPasswordHooks()
 }
+
+// Keep main in sync so fullscreen can choose native vs simple based on PiP state.
+window.addEventListener(
+  'enterpictureinpicture',
+  () => {
+    ipcRenderer.send(IpcChannels.PAGE_PICTURE_IN_PICTURE_CHANGED, true)
+  },
+  true
+)
+window.addEventListener(
+  'leavepictureinpicture',
+  () => {
+    ipcRenderer.send(IpcChannels.PAGE_PICTURE_IN_PICTURE_CHANGED, false)
+  },
+  true
+)
+
+let activeLinkDragUrl: string | null = null
+
+function linkDragUrlFromEvent(event: DragEvent): string | null {
+  const target = event.target
+  if (!(target instanceof Element)) return null
+  const anchor = target.closest('a[href]')
+  if (!(anchor instanceof HTMLAnchorElement)) return null
+  const href = anchor.href
+  if (!href || href.startsWith('javascript:')) return null
+  return href
+}
+
+document.addEventListener(
+  'dragstart',
+  (event) => {
+    if (!(event instanceof DragEvent)) return
+    const url = linkDragUrlFromEvent(event)
+    if (!url) return
+    activeLinkDragUrl = url
+    ipcRenderer.send(IpcChannels.PAGE_LINK_DRAG, { phase: 'start', url })
+  },
+  true
+)
+
+document.addEventListener(
+  'dragend',
+  (event) => {
+    if (!(event instanceof DragEvent)) return
+    const url = activeLinkDragUrl
+    activeLinkDragUrl = null
+    if (!url) return
+    ipcRenderer.send(IpcChannels.PAGE_LINK_DRAG, {
+      phase: 'end',
+      url,
+      screenX: event.screenX,
+      screenY: event.screenY
+    })
+  },
+  true
+)

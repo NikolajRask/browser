@@ -2,7 +2,7 @@ import { existsSync } from 'fs'
 import { basename, dirname, extname, join } from 'path'
 import { app, shell, type DownloadItem, type WebContents } from 'electron'
 import type { DownloadEntry, DownloadState } from '../shared/ipc'
-import { getBrowserSession } from './browser-session'
+import { getBrowserSession, getIncognitoSession } from './browser-session'
 import type { DownloadsStore } from './downloads-store'
 
 type DownloadManagerOptions = {
@@ -25,9 +25,12 @@ export class DownloadManager {
     if (this.attached) return
     this.attached = true
 
-    getBrowserSession().on('will-download', (_event, item) => {
+    const onWillDownload = (_event: unknown, item: DownloadItem): void => {
       this.handleWillDownload(item)
-    })
+    }
+
+    getBrowserSession().on('will-download', onWillDownload)
+    getIncognitoSession().on('will-download', onWillDownload)
   }
 
   list(): DownloadEntry[] {

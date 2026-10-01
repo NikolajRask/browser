@@ -18,6 +18,8 @@ type Props = {
   favicon: string | null
   canGoBack: boolean
   canGoForward: boolean
+  aiSidebarOpen: boolean
+  onToggleAiSidebar: () => void
   onBack: () => void
   onForward: () => void
   onReload: () => void
@@ -152,11 +154,14 @@ export function NavBar({
   favicon,
   canGoBack,
   canGoForward,
+  aiSidebarOpen,
+  onToggleAiSidebar,
   onBack,
   onForward,
   onReload,
   onNavigate
 }: Props): React.JSX.Element {
+  const isMac = window.lockin.platform === 'darwin'
   const [draft, setDraft] = useState(url)
   const [menuOpen, setMenuOpen] = useState(false)
   const [downloadsOpen, setDownloadsOpen] = useState(false)
@@ -740,6 +745,33 @@ export function NavBar({
                 role="menuitem"
                 onClick={() => {
                   closeMenu()
+                  void window.lockin.createTab(undefined, { isIncognito: true })
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M8 2.2c1.6 0 2.9 1.1 3.2 2.6h.9c.7 0 1.2.6 1.1 1.3l-.4 2.2c-.3 1.5-1.6 2.6-3.1 2.6H6.3c-1.5 0-2.8-1.1-3.1-2.6L2.8 6.1c-.1-.7.4-1.3 1.1-1.3h.9C5.1 3.3 6.4 2.2 8 2.2Z"
+                    fill="currentColor"
+                    opacity="0.9"
+                  />
+                  <circle cx="5.6" cy="7.4" r="1.15" fill="#fff" />
+                  <circle cx="10.4" cy="7.4" r="1.15" fill="#fff" />
+                  <path
+                    d="M4.2 12.2c1.1.9 2.4 1.4 3.8 1.4s2.7-.5 3.8-1.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                New Incognito Tab
+                <span className="app-menu-shortcut">{isMac ? '⌘⇧N' : 'Ctrl+Shift+N'}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
                   onNavigate('lockin://bookmarks')
                 }}
               >
@@ -886,6 +918,29 @@ export function NavBar({
                 role="menuitem"
                 onClick={() => {
                   closeMenu()
+                  onToggleAiSidebar()
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M4.2 3.5h7.6c.8 0 1.4.6 1.4 1.4v5.2c0 .8-.6 1.4-1.4 1.4H8.6L6.4 13.4V11.5H4.2c-.8 0-1.4-.6-1.4-1.4V4.9c0-.8.6-1.4 1.4-1.4Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinejoin="round"
+                  />
+                  <circle cx="6.2" cy="7.2" r="0.85" fill="currentColor" />
+                  <circle cx="8" cy="7.2" r="0.85" fill="currentColor" />
+                  <circle cx="9.8" cy="7.2" r="0.85" fill="currentColor" />
+                </svg>
+                AI Assistant
+                {aiSidebarOpen ? <span className="app-menu-shortcut">On</span> : null}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
                   onNavigate('lockin://settings')
                 }}
               >
@@ -907,6 +962,37 @@ export function NavBar({
                   />
                 </svg>
                 Settings
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenu()
+                  void window.lockin.togglePictureInPicture()
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <rect
+                    x="2.5"
+                    y="3.5"
+                    width="11"
+                    height="9"
+                    rx="1.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                  />
+                  <rect
+                    x="8"
+                    y="7.5"
+                    width="4.5"
+                    height="3.5"
+                    rx="0.8"
+                    fill="currentColor"
+                    opacity="0.9"
+                  />
+                </svg>
+                Picture in Picture
               </button>
               <button
                 type="button"
